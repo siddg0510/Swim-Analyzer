@@ -35,7 +35,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
+    QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
     QDoubleSpinBox, QMessageBox, QRadioButton, QButtonGroup, QListWidgetItem,
     QScrollArea
 )
@@ -115,10 +115,10 @@ class CalibrationDialog(QDialog):
         panel.setContentsMargins(0, 0, 0, 0)
         
         step1_label = QLabel(
-            "<b>Step 1 — Reference points.</b> Click a visible landmark "
-            "(lane-rope knot, flag, T-mark, wall) then enter the distance "
-            "in metres from the start wall along the lane. Add 4+ "
-            "non-collinear points for the best accuracy."
+            "<b>Step 1 — Reference points.</b> Click visible landmarks "
+            "(e.g., start wall, 5m mark) in the <b>current frame</b> and enter "
+            "their distance in metres. Add 2+ points. You do NOT need to click "
+            "the 50m wall if it is off-screen."
         )
         step1_label.setWordWrap(True)
         panel.addWidget(step1_label)

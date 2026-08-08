@@ -22,6 +22,7 @@ from .config import DEFAULT_VIDEO_FPS_FALLBACK
 from .vision.calibration import PoolCalibrator, CalibrationResult
 from .vision.cap_tracker import CapTracker, FinishLineOpticalFlowTracker
 from .vision.pose_estimator import PoseEstimator, PoseFrame
+from .vision.ego_motion import EgoMotionTracker
 from .vision.stroke_classifier import classify_window, StrokeClassification
 from .audio.start_detector import (
     extract_audio_wav, detect_start_from_audio, detect_start_visual_fallback,
@@ -113,6 +114,8 @@ class AnalysisWorker(QThread):
 
         frame_idx = 0
         cap.set(cv2.CAP_PROP_POS_MSEC, max(start_result.start_time_s * 1000 - 500, 0))
+        
+        ego_tracker = None
         while True:
             if self._cancelled:
                 raise RuntimeError("Cancelled by user.")
@@ -129,12 +132,19 @@ class AnalysisWorker(QThread):
 
             tp = tracker.track_frame(frame, frame_idx)
             
+            if ego_tracker is None:
+                ego_tracker = EgoMotionTracker(frame, cfg.lane_polygon_px)
+                
+            cam_dx, cam_dy = ego_tracker.update(frame)
+            
             # Skip saving data for pre-start padding frames (tracker state is still updated)
             if t_s < 0:
                 frame_idx += 1
                 continue
                 
-            distance_m = calibrator.pixel_to_distance(tp.x_px, tp.y_px)
+            # Shift the tracked point by the cumulative camera motion to map it 
+            # back to the coordinate space of the calibration frame
+            distance_m = calibrator.pixel_to_distance(tp.x_px + cam_dx, tp.y_px + cam_dy)
 
             if distance_m >= cfg.pool_length_m - FINISH_ZONE_M and not finish_active:
                 finish_tracker.seed(frame, (tp.x_px, tp.y_px))
