@@ -1,0 +1,19 @@
+# Core CV / numerics
+opencv-python-headless==4.13.0.*
+numpy==2.4.*
+scipy==1.17.*
+
+# Pose estimation (Tasks API — see models/DOWNLOAD_MODEL.md)
+mediapipe==0.10.33
+
+# GUI + charts
+PySide6==6.11.*
+matplotlib==3.10.*
+
+# Audio extraction (bundles a static ffmpeg binary per platform — no
+# system ffmpeg install required, and it's what makes offline audio
+# extraction possible in a PyInstaller build)
+imageio-ffmpeg==0.6.*
+
+# Packaging
+pyinstaller==6.*
