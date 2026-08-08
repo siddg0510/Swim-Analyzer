@@ -1,35 +1,3 @@
-"""
-Calibration dialog (spec section 3: "quick manual calibration overlay").
-
-Two click modes on the same first-frame image:
-  1. Reference points: click a spot, type the real-world distance (in
-     metres, measured from the start wall along the lane) it corresponds
-     to — lane rope knots, backstroke flags, T-marks, or simply both end
-     walls if nothing else is visible. 4+ points (not all in a line) let
-     PoolCalibrator build a full perspective-corrected homography; 2-3
-     points fall back to a simpler linear along-lane mapping.
-  2. Lane polygon: click the corners of the swimmer's lane so cap
-     tracking can ignore neighbouring lanes.
-
-Bug fixed here: clicked points were landing at the wrong spot on the
-image. Root cause was two separate issues that both shift click
-coordinates away from the image:
-  1. The image QLabel sat in a QHBoxLayout with a stretch factor, which
-     lets Qt grow the label larger than the actual pixmap inside it
-     (e.g. on window resize). event.position() is measured against the
-     *label*, not the pixmap, so once the two sizes diverge, converting
-     click position -> image pixel using only a single scale factor
-     produces an increasingly wrong answer.
-  2. On any display with OS-level UI scaling above 100% (the Windows
-     default on most laptops, and the Mac Retina default), Qt's
-     QImage/QPixmap can apply an implicit device-pixel-ratio scale on
-     top of whatever this code already did, double-scaling the
-     coordinates.
-Fix: pin the label to the pixmap's exact size (so layout stretch can't
-touch it), force top-left alignment explicitly instead of relying on
-QLabel's default, and force devicePixelRatio to 1.0 on the QImage so Qt
-doesn't apply a second, invisible scale on top of this code's own.
-"""
 from __future__ import annotations
 
 import cv2
@@ -37,11 +5,12 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
     QDoubleSpinBox, QMessageBox, QRadioButton, QButtonGroup, QListWidgetItem,
-    QScrollArea
+    QScrollArea, QSlider
 )
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
 from PySide6.QtCore import Qt, QPoint
 
+from src.vision.calibration import CalibrationKeyframe
 
 def _cv_frame_to_qpixmap(frame_bgr: np.ndarray) -> QPixmap:
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -49,76 +18,76 @@ def _cv_frame_to_qpixmap(frame_bgr: np.ndarray) -> QPixmap:
     h, w, ch = rgb.shape
     qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
     qimg = qimg.copy()
-    # Force 1:1 — without this, Qt can silently apply the screen's DPI
-    # scale factor on top of ours, so a click at logical position (x, y)
-    # no longer corresponds to image pixel (x, y) even after our own
-    # scale-factor math. This was the main cause of clicks landing on
-    # the wrong spot.
     qimg.setDevicePixelRatio(1.0)
     return QPixmap.fromImage(qimg)
-
 
 class ClickableImageLabel(QLabel):
     def __init__(self, on_click):
         super().__init__()
         self._on_click = on_click
         self.setMouseTracking(True)
-        # Top-left alignment, explicitly — QLabel's default can vertically
-        # centre a pixmap smaller than the label, which silently shifts
-        # every click's y-coordinate if the label is ever taller than the
-        # image (e.g. from layout stretch or the side panel forcing a
-        # minimum dialog height).
         self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._on_click(event.position().x(), event.position().y())
 
-
 class CalibrationDialog(QDialog):
-    def __init__(self, first_frame_bgr: np.ndarray, parent=None):
+    def __init__(self, video_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Pool Calibration")
-        self.resize(1000, 700)
-
-        self.frame = first_frame_bgr
+        self.setWindowTitle("Multi-Frame Pool Calibration")
+        self.resize(1100, 750)
+        
+        self.video_path = video_path
+        self.cap = cv2.VideoCapture(video_path)
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if self.total_frames <= 0:
+            self.total_frames = 1000 # Fallback
+            
+        self.current_frame_idx = 0
         self.display_scale = 1.0
+        
+        self.keyframes: list[CalibrationKeyframe] = []
+        
+        # State for current frame
         self.reference_points: list[tuple[tuple[float, float], float]] = []
         self.lane_polygon: list[tuple[float, float]] = []
-        self.mode = "reference"  # or "lane"
+        self.mode = "reference"
 
         layout = QHBoxLayout(self)
 
-        # -- image + click handling --
-        self.image_label = ClickableImageLabel(self._handle_click)
-        pixmap = _cv_frame_to_qpixmap(self.frame)
-        max_w = 760
-        if pixmap.width() > max_w:
-            self.display_scale = max_w / pixmap.width()
-            pixmap = pixmap.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
-        self.base_pixmap = pixmap
-        self.image_label.setPixmap(pixmap)
-        self.image_label.setFixedSize(pixmap.size())
+        # -- Left side: image + slider --
+        left_layout = QVBoxLayout()
         
-        # Wrap image in a scroll area to handle small laptop screens
+        self.image_label = ClickableImageLabel(self._handle_click)
         scroll = QScrollArea()
         scroll.setWidget(self.image_label)
         scroll.setWidgetResizable(False)
         scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_layout.addWidget(scroll, stretch=1)
         
-        layout.addWidget(scroll, stretch=1)
+        slider_row = QHBoxLayout()
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, self.total_frames - 1)
+        self.slider.valueChanged.connect(self._on_slider_change)
+        
+        self.frame_label = QLabel("Frame 0")
+        slider_row.addWidget(self.slider)
+        slider_row.addWidget(self.frame_label)
+        left_layout.addLayout(slider_row)
+        
+        layout.addLayout(left_layout, stretch=1)
 
-        # -- side panel --
+        # -- Right side: panel --
         panel_widget = QWidget()
         panel_widget.setFixedWidth(350)
         panel = QVBoxLayout(panel_widget)
         panel.setContentsMargins(0, 0, 0, 0)
         
         step1_label = QLabel(
-            "<b>Step 1 — Reference points.</b> Click visible landmarks "
-            "(e.g., start wall, 5m mark) in the <b>current frame</b> and enter "
-            "their distance in metres. Add 2+ points. You do NOT need to click "
-            "the 50m wall if it is off-screen."
+            "<b>Step 1 — Frame Selection.</b> Scrub to a frame where landmarks are visible. "
+            "Draw your reference points and lane boundaries. "
+            "Then click <b>Save Keyframe</b>."
         )
         step1_label.setWordWrap(True)
         panel.addWidget(step1_label)
@@ -139,34 +108,107 @@ class CalibrationDialog(QDialog):
         self.distance_spin.setRange(0, 200)
         self.distance_spin.setSuffix(" m")
         self.distance_spin.setDecimals(2)
-        panel.addWidget(QLabel("Distance for next clicked point:"))
+        panel.addWidget(QLabel("Distance for next point:"))
         panel.addWidget(self.distance_spin)
 
         self.points_list = QListWidget()
+        panel.addWidget(QLabel("Current Frame Points:"))
         panel.addWidget(self.points_list, stretch=1)
 
         btn_row = QHBoxLayout()
-        undo_btn = QPushButton("Undo last point")
+        undo_btn = QPushButton("Undo")
         undo_btn.clicked.connect(self._undo_last)
-        clear_btn = QPushButton("Clear all")
+        clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self._clear_all)
         btn_row.addWidget(undo_btn)
         btn_row.addWidget(clear_btn)
         panel.addLayout(btn_row)
 
-        step2_label = QLabel(
-            "<b>Step 2 — Lane boundary.</b> Switch to 'Lane boundary', "
-            "click the 4 corners of the target lane (clockwise), then "
-            "press Done."
-        )
-        step2_label.setWordWrap(True)
-        panel.addWidget(step2_label)
+        save_kf_btn = QPushButton("Save Keyframe")
+        save_kf_btn.setStyleSheet("background-color: #2E8B57; color: white; font-weight: bold; padding: 5px;")
+        save_kf_btn.clicked.connect(self._save_keyframe)
+        panel.addWidget(save_kf_btn)
+        
+        self.kf_list = QListWidget()
+        panel.addWidget(QLabel("Saved Keyframes:"))
+        panel.addWidget(self.kf_list, stretch=1)
+        
+        kf_btn_row = QHBoxLayout()
+        remove_kf_btn = QPushButton("Remove Selected")
+        remove_kf_btn.clicked.connect(self._remove_keyframe)
+        kf_btn_row.addWidget(remove_kf_btn)
+        panel.addLayout(kf_btn_row)
 
         done_btn = QPushButton("Done")
         done_btn.clicked.connect(self._on_done)
         panel.addWidget(done_btn)
 
         layout.addWidget(panel_widget)
+        
+        # Load initial frame
+        self._load_frame(0)
+
+    def _load_frame(self, frame_idx: int) -> None:
+        self.current_frame_idx = frame_idx
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = self.cap.read()
+        if not ok:
+            return
+            
+        self.frame = frame
+        pixmap = _cv_frame_to_qpixmap(self.frame)
+        max_w = 760
+        if pixmap.width() > max_w:
+            self.display_scale = max_w / pixmap.width()
+            pixmap = pixmap.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
+        else:
+            self.display_scale = 1.0
+            
+        self.base_pixmap = pixmap
+        self.image_label.setPixmap(pixmap)
+        self.image_label.setFixedSize(pixmap.size())
+        
+        self.frame_label.setText(f"Frame {frame_idx}")
+        self._redraw()
+        
+    def _on_slider_change(self, value: int) -> None:
+        self._load_frame(value)
+        
+    def _save_keyframe(self) -> None:
+        if len(self.reference_points) < 2:
+            QMessageBox.warning(self, "Not enough points", "Add at least 2 reference points for a keyframe.")
+            return
+            
+        kf = CalibrationKeyframe(
+            frame_idx=self.current_frame_idx,
+            reference_points=list(self.reference_points),
+            lane_polygon_px=list(self.lane_polygon)
+        )
+        
+        # If there's already a keyframe for this exact frame, replace it
+        replaced = False
+        for i, existing in enumerate(self.keyframes):
+            if existing.frame_idx == self.current_frame_idx:
+                self.keyframes[i] = kf
+                replaced = True
+                break
+                
+        if not replaced:
+            self.keyframes.append(kf)
+            
+        self.keyframes.sort(key=lambda k: k.frame_idx)
+        
+        self.kf_list.clear()
+        for k in self.keyframes:
+            self.kf_list.addItem(f"Frame {k.frame_idx}: {len(k.reference_points)} pts, {len(k.lane_polygon_px)} lane pts")
+            
+        self._clear_all()
+        
+    def _remove_keyframe(self) -> None:
+        row = self.kf_list.currentRow()
+        if row >= 0:
+            self.kf_list.takeItem(row)
+            self.keyframes.pop(row)
 
     def _mode_changed(self, checked: bool) -> None:
         self.mode = "reference" if self.rb_reference.isChecked() else "lane"
@@ -175,10 +217,8 @@ class CalibrationDialog(QDialog):
         return x_display / self.display_scale, y_display / self.display_scale
 
     def _handle_click(self, x_display: float, y_display: float) -> None:
-        # Defensive clamp: with the label now fixed-size, this should
-        # never fire outside [0, pixmap size), but clamp anyway rather
-        # than silently accept an out-of-frame coordinate if some
-        # platform still delivers a stray click during a resize.
+        if not hasattr(self, "base_pixmap"):
+            return
         x_display = max(0.0, min(x_display, self.base_pixmap.width() - 1))
         y_display = max(0.0, min(y_display, self.base_pixmap.height() - 1))
 
@@ -187,12 +227,12 @@ class CalibrationDialog(QDialog):
             dist = self.distance_spin.value()
             self.reference_points.append(((x_orig, y_orig), dist))
             self.points_list.addItem(
-                QListWidgetItem(f"Reference: ({x_orig:.0f}, {y_orig:.0f}) -> {dist:.2f} m")
+                QListWidgetItem(f"Ref: ({x_orig:.0f}, {y_orig:.0f}) -> {dist:.2f} m")
             )
         else:
             self.lane_polygon.append((x_orig, y_orig))
             self.points_list.addItem(
-                QListWidgetItem(f"Lane corner: ({x_orig:.0f}, {y_orig:.0f})")
+                QListWidgetItem(f"Lane: ({x_orig:.0f}, {y_orig:.0f})")
             )
         self._redraw()
 
@@ -212,6 +252,8 @@ class CalibrationDialog(QDialog):
         self._redraw()
 
     def _redraw(self) -> None:
+        if not hasattr(self, "base_pixmap"):
+            return
         pixmap = self.base_pixmap.copy()
         painter = QPainter(pixmap)
         painter.setPen(QPen(QColor("yellow"), 3))
@@ -233,9 +275,7 @@ class CalibrationDialog(QDialog):
         painter.setFont(QFont("Arial", 14, QFont.Bold))
         painter.setPen(QColor("yellow"))
         if not self.reference_points:
-            painter.drawText(20, 40, "Step 1: Click the start wall (set distance to 0m)")
-        elif len(self.reference_points) == 1:
-            painter.drawText(20, 40, "Step 1: Click the finish wall (set distance to e.g. 50m)")
+            painter.drawText(20, 40, "Step 1: Click a reference point")
         else:
             painter.drawText(20, 40, f"{len(self.reference_points)} reference points placed.")
             
@@ -247,11 +287,11 @@ class CalibrationDialog(QDialog):
         self.image_label.setPixmap(pixmap)
 
     def _on_done(self) -> None:
-        if len(self.reference_points) < 2:
-            QMessageBox.warning(self, "Not enough points",
-                                 "Add at least 2 reference points (4+ recommended).")
+        if not self.keyframes:
+            QMessageBox.warning(self, "No keyframes", "You must save at least one keyframe before finishing.")
             return
+        self.cap.release()
         self.accept()
 
-    def get_calibration_data(self):
-        return self.reference_points, self.lane_polygon
+    def get_calibration_keyframes(self) -> list[CalibrationKeyframe]:
+        return self.keyframes

@@ -157,9 +157,9 @@ def reconcile_with_backward_pass(
                 # Apply any recovered positions to the flagged span.
                 for p in points[span_start:span_end + 1]:
                     if p.frame_idx in backward_positions:
-                        x, y = backward_positions[p.frame_idx]
-                        p.x_px, p.y_px = x, y
-                        p.distance_m = pixel_to_distance_fn(x, y)
+                        new_x, new_y = backward_positions[p.frame_idx]
+                        p.x_px, p.y_px = new_x, new_y
+                        p.distance_m = pixel_to_distance_fn(p)
                         p.method = "backward_reconciled"
                         p.confidence = max(p.confidence, 0.6)
                         reconciled_any = True

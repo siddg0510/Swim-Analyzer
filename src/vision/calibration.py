@@ -35,6 +35,13 @@ class ReferencePoint:
 
 
 @dataclass
+class CalibrationKeyframe:
+    frame_idx: int
+    reference_points: list[tuple[tuple[float, float], float]]
+    lane_polygon_px: list[tuple[float, float]]
+
+
+@dataclass
 class CalibrationResult:
     mode: str  # "homography" or "linear"
     homography: np.ndarray | None = None

@@ -11,6 +11,7 @@ crashes — the opposite of what "keep the GUI smooth" is asking for.
 """
 from __future__ import annotations
 
+from .vision.calibration import CalibrationKeyframe
 from dataclasses import dataclass, field
 import tempfile
 import os
@@ -43,9 +44,8 @@ from .config import FINISH_ZONE_M
 class AnalysisConfig:
     video_path: str
     pool_length_m: float
-    lane_polygon_px: list[tuple[float, float]]
+    calibration_keyframes: list[CalibrationKeyframe]
     cap_color: str
-    calibration: CalibrationResult
     wall_position_m: float = None  # set to pool_length_m if turn analysis wanted
 
 
@@ -100,10 +100,18 @@ class AnalysisWorker(QThread):
 
         # ---- 2. Frame-by-frame cap tracking + pose --------------------
         self.progress.emit(10, "Tracking swimmer…")
+        
+        # Sort keyframes by frame_idx just to be safe
+        keyframes = sorted(cfg.calibration_keyframes, key=lambda k: k.frame_idx)
+        current_kf_idx = 0
+        active_kf = keyframes[0]
+        
         calibrator = PoolCalibrator()
-        calibrator._result = cfg.calibration
+        for pixel, dist in active_kf.reference_points:
+            calibrator.add_point(pixel, dist)
+        calibrator.solve()
 
-        tracker = CapTracker(cfg.cap_color, cfg.lane_polygon_px)
+        tracker = CapTracker(cfg.cap_color, active_kf.lane_polygon_px)
         pose_estimator = PoseEstimator()
 
         frames_cache: dict[int, np.ndarray] = {}
@@ -130,10 +138,27 @@ class AnalysisWorker(QThread):
             if frame_idx - 450 in frames_cache:
                 del frames_cache[frame_idx - 450]
 
+            # Check if we crossed a new keyframe
+            if current_kf_idx + 1 < len(keyframes) and frame_idx >= keyframes[current_kf_idx + 1].frame_idx:
+                current_kf_idx += 1
+                active_kf = keyframes[current_kf_idx]
+                
+                # Rebuild calibrator for the new keyframe
+                calibrator = PoolCalibrator()
+                for pixel, dist in active_kf.reference_points:
+                    calibrator.add_point(pixel, dist)
+                calibrator.solve()
+                
+                # Update lane constraints for cap tracker
+                tracker.lane_polygon = np.array(active_kf.lane_polygon_px, dtype=np.int32)
+                
+                # Force EgoMotionTracker to re-initialize on this frame, anchoring drift to 0
+                ego_tracker = None
+
             tp = tracker.track_frame(frame, frame_idx)
             
             if ego_tracker is None:
-                ego_tracker = EgoMotionTracker(frame, cfg.lane_polygon_px)
+                ego_tracker = EgoMotionTracker(frame, active_kf.lane_polygon_px)
                 
             cam_dx, cam_dy = ego_tracker.update(frame)
             
@@ -183,17 +208,80 @@ class AnalysisWorker(QThread):
         cap.release()
         pose_estimator.close()
 
-        # ---- 3. Self-correction pass -----------------------------------
+        # Create a helper to get distance for any frame using the correct keyframe
+        def get_distance_for_frame(f_idx: int, x: float, y: float) -> float:
+            kf = keyframes[0]
+            for k in keyframes:
+                if k.frame_idx <= f_idx:
+                    kf = k
+                else:
+                    break
+            
+            calib = PoolCalibrator()
+            for pixel, dist in kf.reference_points:
+                calib.add_point(pixel, dist)
+            calib.solve()
+            return calib.pixel_to_distance(x, y)
+
+        # 1. Compute offsets per frame to eliminate calibration jumps
+        frame_offsets: dict[int, float] = {}
+        for i in range(1, len(keyframes)):
+            kf_prev = keyframes[i-1]
+            kf_curr = keyframes[i]
+            
+            idx_curr = -1
+            for j, p in enumerate(track_points):
+                if p.frame_idx >= kf_curr.frame_idx:
+                    idx_curr = j
+                    break
+            
+            if idx_curr > 0:
+                idx_prev = 0
+                for j in range(idx_curr - 1, -1, -1):
+                    if track_points[j].frame_idx <= kf_prev.frame_idx:
+                        idx_prev = j
+                        break
+                        
+                if idx_prev >= 0 and idx_curr > idx_prev:
+                    v_window = min(5, idx_curr - idx_prev - 1)
+                    if v_window > 0:
+                        dt = track_points[idx_curr-1].time_s - track_points[idx_curr-1-v_window].time_s
+                        dd = track_points[idx_curr-1].distance_m - track_points[idx_curr-1-v_window].distance_m
+                        v_prev = dd / dt if dt > 1e-6 else 0.0
+                    else:
+                        v_prev = 0.0
+                        
+                    dt_boundary = track_points[idx_curr].time_s - track_points[idx_curr-1].time_s
+                    true_movement = v_prev * dt_boundary
+                    
+                    jump = track_points[idx_curr].distance_m - track_points[idx_curr-1].distance_m
+                    error_to_distribute = jump - true_movement
+                    
+                    frame_span = track_points[idx_curr].frame_idx - track_points[idx_prev].frame_idx
+                    if frame_span > 0:
+                        for j in range(idx_prev, idx_curr):
+                            f_idx = track_points[j].frame_idx
+                            fraction = (f_idx - track_points[idx_prev].frame_idx) / frame_span
+                            frame_offsets[f_idx] = frame_offsets.get(f_idx, 0.0) + (error_to_distribute * fraction)
+
+        # Apply the offsets immediately
+        for p in track_points:
+            p.distance_m += frame_offsets.get(p.frame_idx, 0.0)
+
+        def get_smoothed_distance_for_frame(f_idx: int, x: float, y: float) -> float:
+            base_dist = get_distance_for_frame(f_idx, x, y)
+            return base_dist + frame_offsets.get(f_idx, 0.0)
+
         self.progress.emit(82, "Checking for tracking discrepancies…")
         flagged = flag_outliers(track_points)
         discrepancy_report = reconcile_with_backward_pass(
             track_points, flagged, frames_cache,
-            pixel_to_distance_fn=calibrator.pixel_to_distance,
+            pixel_to_distance_fn=lambda p: get_smoothed_distance_for_frame(p.frame_idx, p.x_px + p.cam_dx, p.y_px + p.cam_dy)
         )
         # Recompute distances for any points whose x/y moved during
         # reconciliation.
         for p in track_points:
-            p.distance_m = calibrator.pixel_to_distance(p.x_px + p.cam_dx, p.y_px + p.cam_dy)
+            p.distance_m = get_smoothed_distance_for_frame(p.frame_idx, p.x_px + p.cam_dx, p.y_px + p.cam_dy)
 
         times_arr = np.array([p.time_s for p in track_points])
         dist_arr = np.array([p.distance_m for p in track_points])

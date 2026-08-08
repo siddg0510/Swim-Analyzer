@@ -118,27 +118,19 @@ class MainWindow(QMainWindow):
         if path:
             self.video_path = path
             self.video_label.setText(path)
-            self.reference_points = []
-            self.lane_polygon = []
+            self.calibration_keyframes = []
             self.calib_status.setText("Not calibrated yet.")
 
     def _open_calibration(self) -> None:
         if not self.video_path:
             QMessageBox.warning(self, "No video", "Select a video first.")
             return
-        cap = cv2.VideoCapture(self.video_path)
-        ok, frame = cap.read()
-        cap.release()
-        if not ok:
-            QMessageBox.critical(self, "Error", "Could not read the first frame of this video.")
-            return
 
-        dialog = CalibrationDialog(frame, parent=self)
+        dialog = CalibrationDialog(self.video_path, parent=self)
         if dialog.exec():
-            self.reference_points, self.lane_polygon = dialog.get_calibration_data()
+            self.calibration_keyframes = dialog.get_calibration_keyframes()
             self.calib_status.setText(
-                f"Calibrated: {len(self.reference_points)} reference point(s), "
-                f"{len(self.lane_polygon)}-point lane boundary."
+                f"Calibrated: {len(self.calibration_keyframes)} keyframes saved."
             )
 
     def _get_cap_color(self) -> str:
@@ -151,21 +143,15 @@ class MainWindow(QMainWindow):
         if not self.video_path:
             QMessageBox.warning(self, "No video", "Select a video first.")
             return
-        if len(self.reference_points) < 2:
-            QMessageBox.warning(self, "Not calibrated", "Complete calibration first (at least 2 reference points).")
+        if not hasattr(self, 'calibration_keyframes') or not self.calibration_keyframes:
+            QMessageBox.warning(self, "Not calibrated", "Complete calibration first (at least 1 keyframe).")
             return
-
-        calibrator = PoolCalibrator()
-        for pixel, dist in self.reference_points:
-            calibrator.add_point(pixel, dist)
-        calibration_result = calibrator.solve()
 
         cfg = AnalysisConfig(
             video_path=self.video_path,
             pool_length_m=self.pool_length_spin.value(),
-            lane_polygon_px=self.lane_polygon or None,
+            calibration_keyframes=self.calibration_keyframes,
             cap_color=self._get_cap_color(),
-            calibration=calibration_result,
             wall_position_m=self.pool_length_spin.value(),
         )
 
