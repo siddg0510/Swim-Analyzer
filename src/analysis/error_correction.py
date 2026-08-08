@@ -38,9 +38,11 @@ class TrackPoint:
     time_s: float
     x_px: float
     y_px: float
+    cam_dx: float
+    cam_dy: float
     distance_m: float
     confidence: float
-    method: str  # "tracked", "backward_reconciled", "kalman_interpolated"
+    method: str  # "tracked", "backward_reconciled", "kalman_interpolated", "pose_fallback"
 
 
 @dataclass

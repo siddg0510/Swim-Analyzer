@@ -135,8 +135,8 @@ def test_outlier_flagging_catches_impossible_jump():
 
     points = []
     for i in range(30):
-        points.append(TrackPoint(i, i * 0.1, x_px=i * 5, y_px=200,
-                                  distance_m=i * 0.15, confidence=0.9, method="tracked"))
+        points.append(TrackPoint(i, i * 0.1, x_px=i * 5, y_px=200, cam_dx=0.0, cam_dy=0.0,
+                                 distance_m=i * 0.15, confidence=0.9, method="tracked"))
     # inject one impossible jump (teleport) at frame 15
     points[15].distance_m = points[14].distance_m + 8.0  # ~8m in 0.1s = 80 m/s, impossible
 

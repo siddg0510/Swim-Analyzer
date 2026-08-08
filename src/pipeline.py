@@ -156,13 +156,24 @@ class AnalysisWorker(QThread):
                           # actual stop time from the distance/time trace;
                           # this loop just keeps the flow tracker fed.
 
-            track_points.append(TrackPoint(
-                frame_idx=frame_idx, time_s=t_s, x_px=tp.x_px, y_px=tp.y_px,
-                distance_m=distance_m, confidence=tp.confidence, method="tracked",
-            ))
-
             pf = pose_estimator.process(frame, frame_idx, int(t_s * 1000))
             pose_frames.append((t_s, pf))
+
+            if tp.confidence < 1.0 and pf.present and 0 in pf.landmarks_px:
+                # Fallback to pose estimator's nose if color tracker fails
+                tp.x_px = float(pf.landmarks_px[0][0])
+                tp.y_px = float(pf.landmarks_px[0][1])
+                tp.confidence = 0.9
+                tp.source = "pose_fallback"
+                tracker.kalman.correct(tp.x_px, tp.y_px)
+                # Recalculate distance_m
+                distance_m = calibrator.pixel_to_distance(tp.x_px + cam_dx, tp.y_px + cam_dy)
+
+            track_points.append(TrackPoint(
+                frame_idx=frame_idx, time_s=t_s, x_px=tp.x_px, y_px=tp.y_px,
+                cam_dx=cam_dx, cam_dy=cam_dy,
+                distance_m=distance_m, confidence=tp.confidence, method=tp.source,
+            ))
 
             frame_idx += 1
             if total_frames > 0 and frame_idx % 15 == 0:
@@ -182,7 +193,7 @@ class AnalysisWorker(QThread):
         # Recompute distances for any points whose x/y moved during
         # reconciliation.
         for p in track_points:
-            p.distance_m = calibrator.pixel_to_distance(p.x_px, p.y_px)
+            p.distance_m = calibrator.pixel_to_distance(p.x_px + p.cam_dx, p.y_px + p.cam_dy)
 
         times_arr = np.array([p.time_s for p in track_points])
         dist_arr = np.array([p.distance_m for p in track_points])

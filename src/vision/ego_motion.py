@@ -17,11 +17,8 @@ class EgoMotionTracker:
         if lane_polygon and len(lane_polygon) >= 3:
             pts = np.array(lane_polygon, dtype=np.int32)
             cv2.fillPoly(self.mask, [pts], 0)
-            
-        # Also mask out the top 10% and bottom 10% of the screen as they often contain spectators/moving legs
-        h, w = self.prev_gray.shape
-        self.mask[0:int(h*0.1), :] = 0
-        self.mask[int(h*0.9):, :] = 0
+        # We ONLY mask out the lane polygon, as the pool deck (top/bottom of screen)
+        # is the most reliable static background feature for optical flow.
 
         # Extract initial features to track
         self.p0 = cv2.goodFeaturesToTrack(
