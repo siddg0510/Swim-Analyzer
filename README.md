@@ -1,4 +1,7 @@
-# Swim Race Analyzer
+# Swim-Analyzer
+
+By: Siddharth Gulati
+Reach out to me at: https://www.linkedin.com/in/siddharth-gulati-4742143a1/ 
 
 Offline desktop app for analyzing swim race video: splits, stroke rate/
 length, start and turn phase metrics, and a reference-comparison
@@ -162,3 +165,4 @@ Ultralytics YOLOv8 via the `Detector` interface, note that it's
 AGPL-3.0 (or requires a paid Enterprise licence for closed-source
 redistribution) — that's a real legal consideration for a "downloadable
 .exe," not this project's default path.
+
