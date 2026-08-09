@@ -88,3 +88,18 @@ MAX_PLAUSIBLE_SPEED_MPS = 2.6      # fastest human swim speeds sit under this
 MAX_PLAUSIBLE_ACCEL_MPS2 = 6.0     # generous bound for a start/wall push-off
 
 DEFAULT_VIDEO_FPS_FALLBACK = 30.0
+
+# ---------------------------------------------------------------------------
+# AI analysis (Gemini) — optional, the offline pipeline still works without it
+# ---------------------------------------------------------------------------
+EVENTS = [
+    "50m", "100m", "200m", "400m", "800m", "1500m",
+]
+POOL_TYPES = ["long course (50m)", "short course (25m)", "short course yards (25y)"]
+GENDERS = ["male", "female"]
+
+# Maximum video duration to upload for AI analysis (seconds).
+# Short clips are both cheaper and produce better results than full-length
+# race video (Gemini focuses on visible technique rather than processing
+# minutes of footage).
+AI_MAX_CLIP_DURATION_S = 60

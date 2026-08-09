@@ -6,9 +6,19 @@ Run directly:      python main.py
 Build to .exe/.app: see build.spec and README.md
 """
 import sys
+import os
+
+_SCRIPTS_PATH = r"C:\Users\SiddG\AppData\Local\Python\pythoncore-3.14-64\Scripts"
+if _SCRIPTS_PATH not in sys.path:
+    sys.path.append(_SCRIPTS_PATH)
+if _SCRIPTS_PATH not in os.environ.get("PATH", ""):
+    os.environ["PATH"] += os.pathsep + _SCRIPTS_PATH
+
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
 
 from src.gui.main_window import MainWindow
+from src.config import resource_path
 
 
 def main() -> int:
@@ -97,6 +107,10 @@ def main() -> int:
         }
     """)
     
+    icon_path = resource_path("assets", "icon.png")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+        
     window = MainWindow()
     window.show()
     return app.exec()

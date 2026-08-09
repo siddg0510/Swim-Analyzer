@@ -1,15 +1,18 @@
-"""Main window — spec section 1 (UI & initial calibration)."""
+"""Main window — UI, initial calibration, and AI configuration."""
 from __future__ import annotations
 
 import cv2
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit, QFileDialog, QMessageBox,
-    QProgressBar, QGroupBox, QFormLayout, QStackedWidget,
+    QProgressBar, QGroupBox, QFormLayout, QStackedWidget, QCheckBox, QDialog,
+    QDialogButtonBox, QTextEdit,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 
 from ..vision.calibration import PoolCalibrator
+from ..config import resource_path, EVENTS, POOL_TYPES, GENDERS, STROKES
 from ..pipeline import AnalysisConfig, AnalysisWorker, AnalysisResult
 from .calibration_widget import CalibrationDialog
 from .dashboard import DashboardWidget
@@ -20,16 +23,71 @@ CAP_COLOR_PRESETS = [
 ]
 
 
+class APIKeyDialog(QDialog):
+    """Simple dialog for entering / updating the Gemini API key."""
+
+    def __init__(self, parent=None, current_key: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Gemini API Key")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel(
+            "<b>Enter your Google Gemini API key</b><br>"
+            "Get a free key at <a href='https://aistudio.google.com/apikey'>"
+            "aistudio.google.com/apikey</a><br><br>"
+            "The key is stored locally on your machine only."
+        ))
+
+        self.key_edit = QLineEdit()
+        self.key_edit.setPlaceholderText("AIza...")
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        if current_key:
+            self.key_edit.setText(current_key)
+        layout.addWidget(self.key_edit)
+
+        self.show_check = QCheckBox("Show key")
+        self.show_check.toggled.connect(
+            lambda checked: self.key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        layout.addWidget(self.show_check)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_key(self) -> str:
+        return self.key_edit.text().strip()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Swim Race Analyzer")
-        self.resize(720, 560)
+        icon_path = resource_path("assets", "icon.png")
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        self.resize(800, 700)
 
         self.video_path: str | None = None
+        self.reference_video_path: str | None = None
         self.reference_points = []
         self.lane_polygon = []
         self.worker: AnalysisWorker | None = None
+        self._gemini_key: str | None = None
+
+        # Try to load saved API key
+        try:
+            from ..ai.gemini_config import resolve_api_key
+            self._gemini_key = resolve_api_key()
+        except Exception:
+            pass
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -54,14 +112,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(upload_box)
 
         # -- Required inputs --
-        inputs_box = QGroupBox("2. Race setup (pool length, lane, cap colour)")
+        inputs_box = QGroupBox("2. Race setup")
         form = QFormLayout(inputs_box)
 
-        self.pool_length_spin = QDoubleSpinBox()
-        self.pool_length_spin.setRange(10, 100)
-        self.pool_length_spin.setValue(25.0)
-        self.pool_length_spin.setSuffix(" m")
-        form.addRow("Pool length:", self.pool_length_spin)
+        self.pool_length_combo = QComboBox()
+        self.pool_length_combo.addItems(POOL_TYPES)
+        self.pool_length_combo.setCurrentText("short course (25m)")
+        form.addRow("Pool length:", self.pool_length_combo)
 
         self.lane_spin = QSpinBox()
         self.lane_spin.setRange(1, 10)
@@ -81,6 +138,22 @@ class MainWindow(QMainWindow):
         cap_row.addWidget(self.cap_hex_edit)
         form.addRow("Swim cap colour:", cap_row)
 
+        # Event details for AI analysis
+        self.event_combo = QComboBox()
+        self.event_combo.addItems(EVENTS)
+        self.event_combo.setCurrentText("100m")
+        form.addRow("Event distance:", self.event_combo)
+
+        self.stroke_combo = QComboBox()
+        self.stroke_combo.addItems(["auto-detect"] + STROKES)
+        form.addRow("Stroke:", self.stroke_combo)
+
+        self.gender_combo = QComboBox()
+        self.gender_combo.addItems(GENDERS)
+        form.addRow("Gender:", self.gender_combo)
+
+
+
         layout.addWidget(inputs_box)
 
         # -- Calibration --
@@ -93,9 +166,67 @@ class MainWindow(QMainWindow):
         calib_layout.addWidget(calib_btn)
         layout.addWidget(calib_box)
 
+        # -- AI Analysis Settings --
+        ai_box = QGroupBox("4. 🤖 AI Analysis (Gemini)")
+        ai_layout = QVBoxLayout(ai_box)
+
+        self.ai_enabled_check = QCheckBox("Enable AI-powered technique analysis")
+        self.ai_enabled_check.setChecked(bool(self._gemini_key))
+        self.ai_enabled_check.toggled.connect(self._on_ai_toggle)
+        ai_layout.addWidget(self.ai_enabled_check)
+
+        key_row = QHBoxLayout()
+        self.api_key_status = QLabel(
+            "✅ API key configured" if self._gemini_key else "❌ No API key"
+        )
+        api_key_btn = QPushButton("Configure API Key…")
+        api_key_btn.clicked.connect(self._configure_api_key)
+        key_row.addWidget(self.api_key_status)
+        key_row.addStretch(1)
+        key_row.addWidget(api_key_btn)
+        ai_layout.addLayout(key_row)
+
+        # Elite comparison
+        compare_row = QHBoxLayout()
+        compare_row.addWidget(QLabel("Compare with:"))
+        self.elite_combo = QComboBox()
+        self.elite_combo.addItem("Auto-select best match", "auto")
+        try:
+            from ..analysis.benchmarks import get_all_profile_names
+            for key, name, flag in get_all_profile_names():
+                self.elite_combo.addItem(f"{flag} {name}", key)
+        except Exception:
+            pass
+        compare_row.addWidget(self.elite_combo, stretch=1)
+        ai_layout.addLayout(compare_row)
+
+        # Reference video
+        ref_row = QHBoxLayout()
+        self.ref_video_label = QLabel("No reference video (optional)")
+        self.ref_video_label.setWordWrap(True)
+        ref_btn = QPushButton("Add reference video…")
+        ref_btn.clicked.connect(self._browse_reference_video)
+        ref_clear_btn = QPushButton("Clear")
+        ref_clear_btn.clicked.connect(self._clear_reference_video)
+        ref_row.addWidget(self.ref_video_label, stretch=1)
+        ref_row.addWidget(ref_btn)
+        ref_row.addWidget(ref_clear_btn)
+        ai_layout.addLayout(ref_row)
+
+        # Goal
+        goal_row = QHBoxLayout()
+        goal_row.addWidget(QLabel("Your goal:"))
+        self.goal_edit = QLineEdit()
+        self.goal_edit.setPlaceholderText("e.g. Break 55 seconds in 100m freestyle")
+        goal_row.addWidget(self.goal_edit, stretch=1)
+        ai_layout.addLayout(goal_row)
+
+        layout.addWidget(ai_box)
+
         # -- Run --
         run_row = QHBoxLayout()
-        self.run_btn = QPushButton("Run Analysis")
+        self.run_btn = QPushButton("🏊 Run Analysis")
+        self.run_btn.setMinimumHeight(40)
         self.run_btn.clicked.connect(self._run_analysis)
         run_row.addStretch(1)
         run_row.addWidget(self.run_btn)
@@ -121,6 +252,19 @@ class MainWindow(QMainWindow):
             self.calibration_keyframes = []
             self.calib_status.setText("Not calibrated yet.")
 
+    def _browse_reference_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select reference video (e.g. Olympic footage)", "",
+            "Video files (*.mp4 *.mov *.avi *.mkv)"
+        )
+        if path:
+            self.reference_video_path = path
+            self.ref_video_label.setText(f"📹 {path.split('/')[-1].split(chr(92))[-1]}")
+
+    def _clear_reference_video(self) -> None:
+        self.reference_video_path = None
+        self.ref_video_label.setText("No reference video (optional)")
+
     def _open_calibration(self) -> None:
         if not self.video_path:
             QMessageBox.warning(self, "No video", "Select a video first.")
@@ -133,11 +277,63 @@ class MainWindow(QMainWindow):
                 f"Calibrated: {len(self.calibration_keyframes)} keyframes saved."
             )
 
+    def _configure_api_key(self) -> None:
+        dialog = APIKeyDialog(self, current_key=self._gemini_key or "")
+        if dialog.exec():
+            key = dialog.get_key()
+            if key:
+                self._gemini_key = key
+                try:
+                    from ..ai.gemini_config import save_api_key
+                    save_api_key(key)
+                except Exception:
+                    pass
+                self.api_key_status.setText("✅ API key configured")
+                self.ai_enabled_check.setChecked(True)
+            else:
+                self._gemini_key = None
+                self.api_key_status.setText("❌ No API key")
+                self.ai_enabled_check.setChecked(False)
+
+    def _on_ai_toggle(self, checked: bool) -> None:
+        if checked and not self._gemini_key:
+            self._configure_api_key()
+            if not self._gemini_key:
+                self.ai_enabled_check.setChecked(False)
+
     def _get_cap_color(self) -> str:
         choice = self.cap_combo.currentText()
         if choice == "Custom hex…":
             return self.cap_hex_edit.text().strip() or "#FFFF00"
         return choice
+
+    def _get_event_distance(self) -> int:
+        text = self.event_combo.currentText()
+        return int(text.replace("m", ""))
+
+    def _get_stroke_override(self) -> str | None:
+        text = self.stroke_combo.currentText()
+        return None if text == "auto-detect" else text
+
+    def _get_elite_key(self) -> str | None:
+        key = self.elite_combo.currentData()
+        if key == "auto":
+            # Auto-select based on event
+            try:
+                from ..analysis.benchmarks import get_profiles_for_event
+                stroke = self._get_stroke_override() or "freestyle"
+                distance = self._get_event_distance()
+                profiles = get_profiles_for_event(stroke, distance)
+                if profiles:
+                    # Find the key for this profile
+                    from ..analysis.benchmarks import ELITE_PROFILES
+                    for k, p in ELITE_PROFILES.items():
+                        if p.name == profiles[0].name:
+                            return k
+            except Exception:
+                pass
+            return None
+        return key
 
     def _run_analysis(self) -> None:
         if not self.video_path:
@@ -147,12 +343,34 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not calibrated", "Complete calibration first (at least 1 keyframe).")
             return
 
+        ai_enabled = self.ai_enabled_check.isChecked() and bool(self._gemini_key)
+
+        pool_type_text = self.pool_length_combo.currentText()
+        if "50m" in pool_type_text:
+            pool_length_m = 50.0
+        elif "25m" in pool_type_text:
+            pool_length_m = 25.0
+        elif "25y" in pool_type_text:
+            pool_length_m = 22.86  # 25 yards in meters
+        else:
+            pool_length_m = 25.0
+
         cfg = AnalysisConfig(
             video_path=self.video_path,
-            pool_length_m=self.pool_length_spin.value(),
+            pool_length_m=pool_length_m,
             calibration_keyframes=self.calibration_keyframes,
             cap_color=self._get_cap_color(),
-            wall_position_m=self.pool_length_spin.value(),
+            wall_position_m=pool_length_m,
+            # AI options
+            enable_ai=ai_enabled,
+            gemini_api_key=self._gemini_key if ai_enabled else None,
+            stroke_override=self._get_stroke_override(),
+            event_distance_m=self._get_event_distance(),
+            pool_type=pool_type_text.split(" (")[0],
+            swimmer_sex=self.gender_combo.currentText(),
+            elite_compare_key=self._get_elite_key() if ai_enabled else None,
+            reference_video_path=self.reference_video_path if ai_enabled else None,
+            user_goal=self.goal_edit.text().strip() or "Improve race time and technique efficiency",
         )
 
         self.run_btn.setEnabled(False)
@@ -172,11 +390,18 @@ class MainWindow(QMainWindow):
     def _on_finished_ok(self, result: AnalysisResult) -> None:
         self.run_btn.setEnabled(True)
         self.progress.setVisible(False)
-        dashboard = DashboardWidget(result, self.pool_length_spin.value())
+        self.progress_label.setText("")
+        dashboard = DashboardWidget(
+            result, self.worker.cfg.pool_length_m,
+            event_distance=self._get_event_distance(),
+            stroke=self._get_stroke_override(),
+            swimmer_sex=self.gender_combo.currentText(),
+        )
         self.stack.addWidget(dashboard)
         self.stack.setCurrentWidget(dashboard)
 
     def _on_finished_error(self, message: str) -> None:
         self.run_btn.setEnabled(True)
         self.progress.setVisible(False)
+        self.progress_label.setText("")
         QMessageBox.critical(self, "Analysis failed", message)

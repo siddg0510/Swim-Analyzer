@@ -15,5 +15,8 @@ matplotlib==3.10.*
 # extraction possible in a PyInstaller build)
 imageio-ffmpeg==0.6.*
 
+# AI analysis (Google Gemini multimodal video understanding)
+google-genai>=1.14.0
+
 # Packaging
 pyinstaller==6.*

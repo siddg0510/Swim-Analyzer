@@ -193,3 +193,33 @@ def classify_from_motion(times_s: np.ndarray, dist_m: np.ndarray, y_px: list[flo
     confidence = norm_votes.get(best, 0.0) * 0.6 # lower confidence for fallback
     
     return StrokeClassification(best, confidence, norm_votes)
+
+
+def classify_with_gemini(
+    video_path: str,
+    api_key: str | None = None,
+) -> StrokeClassification:
+    """Use Gemini as a high-confidence stroke classifier fallback.
+
+    This is called when neither the pose-based nor motion-based classifiers
+    produce a confident result. Requires an API key and internet access.
+    Falls back to 'unknown' if Gemini is unavailable.
+    """
+    try:
+        from ..ai.gemini_analyzer import GeminiSwimAnalyzer
+
+        analyzer = GeminiSwimAnalyzer(api_key=api_key)
+        stroke, confidence = analyzer.identify_stroke(video_path)
+        analyzer.cleanup()
+
+        if stroke in ("freestyle", "backstroke", "breaststroke", "butterfly"):
+            return StrokeClassification(
+                stroke=stroke,
+                confidence=confidence,
+                votes={stroke: confidence},
+            )
+    except Exception:
+        pass
+
+    return StrokeClassification("unknown", 0.0, {})
+
