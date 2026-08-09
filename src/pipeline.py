@@ -136,15 +136,34 @@ class AnalysisWorker(QThread):
         # ---- 2. Frame-by-frame cap tracking + pose --------------------
         self.progress.emit(10, "Tracking swimmer…")
         
-        # Sort keyframes by frame_idx just to be safe
         keyframes = sorted(cfg.calibration_keyframes, key=lambda k: k.frame_idx)
+        ai_splits = None
+
+        if not keyframes:
+            if cfg.enable_ai and cfg.gemini_api_key:
+                self.progress.emit(7, "🤖 AI Auto-Calibration: Detecting pool markers…")
+                from .ai.gemini_analyzer import GeminiSwimAnalyzer
+                analyzer = GeminiSwimAnalyzer(api_key=cfg.gemini_api_key, model=cfg.gemini_model)
+                ai_splits = analyzer.detect_splits(cfg.video_path, f"with {cfg.cap_color} cap", cfg.pool_length_m)
+                analyzer.cleanup()
+
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+            dummy_kf = CalibrationKeyframe(
+                frame_idx=0,
+                reference_points=[],
+                lane_polygon_px=[(0, 0), (w, 0), (w, h), (0, h)]
+            )
+            keyframes = [dummy_kf]
+
         current_kf_idx = 0
         active_kf = keyframes[0]
         
         calibrator = PoolCalibrator()
-        for pixel, dist in active_kf.reference_points:
-            calibrator.add_point(pixel, dist)
-        calibrator.solve()
+        if active_kf.reference_points:
+            for pixel, dist in active_kf.reference_points:
+                calibrator.add_point(pixel, dist)
+            calibrator.solve()
 
         tracker = CapTracker(cfg.cap_color, active_kf.lane_polygon_px)
         pose_estimator = PoseEstimator()
@@ -244,19 +263,30 @@ class AnalysisWorker(QThread):
         pose_estimator.close()
 
         # Create a helper to get distance for any frame using the correct keyframe
-        def get_distance_for_frame(f_idx: int, x: float, y: float) -> float:
-            kf = keyframes[0]
-            for k in keyframes:
-                if k.frame_idx <= f_idx:
-                    kf = k
-                else:
-                    break
+        if ai_splits and ai_splits.splits:
+            ai_times = [0.0] + [s.time_s for s in ai_splits.splits]
+            ai_dists = [0.0] + [s.distance_m for s in ai_splits.splits]
+            if ai_splits.finish_time_s:
+                ai_times.append(ai_splits.finish_time_s)
+                ai_dists.append(cfg.pool_length_m)
             
-            calib = PoolCalibrator()
-            for pixel, dist in kf.reference_points:
-                calib.add_point(pixel, dist)
-            calib.solve()
-            return calib.pixel_to_distance(x, y)
+            def get_distance_for_point(p: TrackPoint, x: float, y: float) -> float:
+                return float(np.interp(p.time_s, ai_times, ai_dists))
+        else:
+            def get_distance_for_point(p: TrackPoint, x: float, y: float) -> float:
+                kf = keyframes[0]
+                for k in keyframes:
+                    if k.frame_idx <= p.frame_idx:
+                        kf = k
+                    else:
+                        break
+                
+                calib = PoolCalibrator()
+                if kf.reference_points:
+                    for pixel, dist in kf.reference_points:
+                        calib.add_point(pixel, dist)
+                    calib.solve()
+                return calib.pixel_to_distance(x, y)
 
         # 1. Compute offsets per frame to eliminate calibration jumps
         frame_offsets: dict[int, float] = {}
@@ -303,20 +333,20 @@ class AnalysisWorker(QThread):
         for p in track_points:
             p.distance_m += frame_offsets.get(p.frame_idx, 0.0)
 
-        def get_smoothed_distance_for_frame(f_idx: int, x: float, y: float) -> float:
-            base_dist = get_distance_for_frame(f_idx, x, y)
-            return base_dist + frame_offsets.get(f_idx, 0.0)
+        def get_smoothed_distance_for_point(p: TrackPoint, x: float, y: float) -> float:
+            base_dist = get_distance_for_point(p, x, y)
+            return base_dist + frame_offsets.get(p.frame_idx, 0.0)
 
         self.progress.emit(82, "Checking for tracking discrepancies…")
         flagged = flag_outliers(track_points)
         discrepancy_report = reconcile_with_backward_pass(
             track_points, flagged, frames_cache,
-            pixel_to_distance_fn=lambda p: get_smoothed_distance_for_frame(p.frame_idx, p.x_px + p.cam_dx, p.y_px + p.cam_dy)
+            pixel_to_distance_fn=lambda p: get_smoothed_distance_for_point(p, p.x_px + p.cam_dx, p.y_px + p.cam_dy)
         )
         # Recompute distances for any points whose x/y moved during
         # reconciliation.
         for p in track_points:
-            p.distance_m = get_smoothed_distance_for_frame(p.frame_idx, p.x_px + p.cam_dx, p.y_px + p.cam_dy)
+            p.distance_m = get_smoothed_distance_for_point(p, p.x_px + p.cam_dx, p.y_px + p.cam_dy)
 
         times_arr = np.array([p.time_s for p in track_points])
         dist_arr = np.array([p.distance_m for p in track_points])
@@ -556,6 +586,8 @@ class AnalysisWorker(QThread):
             ai_result.error = f"AI dependencies not installed: {e}"
             logger.warning(ai_result.error)
         except Exception as e:
+            if type(e).__name__ == "ModelUnavailableError":
+                raise
             ai_result.error = f"AI analysis error: {e}"
             logger.error(ai_result.error, exc_info=True)
 

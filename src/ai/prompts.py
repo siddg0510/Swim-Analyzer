@@ -343,3 +343,32 @@ Respond with this JSON:
     "overall_technique_gap": "<small|moderate|large>",
     "top_priority_change": "<single most impactful change>"
 }}"""
+
+# ---------------------------------------------------------------------------
+# Split Detection (Auto-Calibration)
+# ---------------------------------------------------------------------------
+SPLIT_DETECTION_PROMPT = """You are an elite race analyst. Watch this swimming video and track the swimmer {swimmer_identifier}.
+
+Your task is to identify the EXACT timestamps when the swimmer's head crosses the pool distance markers. The pool distance markers are typically indicated by distinct color changes (often red) on the lane ropes. 
+For a {pool_length}m pool, the key markers are usually at 5m, 15m, and every 10m thereafter (25m, 35m, 45m).
+The start of the race is when the swimmer dives in or pushes off the wall (0m). The finish is when they touch the opposite wall ({pool_length}m).
+
+If the video doesn't show a particular distance marker being crossed, omit it from the response. 
+If there are no lane ropes or the markers aren't visible, do your best to estimate the timestamps for these standard distances based on the swimmer's velocity and the pool length.
+
+Respond with this exact JSON structure:
+{{
+    "start_time_s": <timestamp of the start dive/push-off in seconds (float)>,
+    "splits": [
+        {{
+            "distance_m": 5,
+            "time_s": <timestamp in seconds (float)>
+        }},
+        {{
+            "distance_m": 15,
+            "time_s": <timestamp in seconds (float)>
+        }}
+    ],
+    "finish_time_s": <timestamp of the final wall touch in seconds (float), or null if not reached>,
+    "confidence_notes": "<Brief note on how visible the markers were and if any estimates were required>"
+}}"""

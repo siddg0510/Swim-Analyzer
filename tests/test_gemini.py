@@ -54,12 +54,12 @@ class TestGeminiConfig(unittest.TestCase):
             del os.environ["GEMINI_API_KEY"]
 
     def test_default_model(self):
-        self.assertEqual(DEFAULT_MODEL, "gemini-2.5-flash")
+        self.assertEqual(DEFAULT_MODEL, "gemini-3.1-pro")
 
     def test_config_dataclass(self):
-        cfg = GeminiConfig(api_key="test", model="gemini-2.5-flash")
+        cfg = GeminiConfig(api_key="test", model="gemini-3.1-pro")
         self.assertEqual(cfg.api_key, "test")
-        self.assertEqual(cfg.model, "gemini-2.5-flash")
+        self.assertEqual(cfg.model, "gemini-3.1-pro")
         self.assertEqual(cfg.max_retries, 3)
 
 
@@ -80,6 +80,7 @@ class TestResponseParsing(unittest.TestCase):
                 self._parse_elite_comparison = real._parse_elite_comparison.__get__(real)
                 self._parse_improvement_plan = real._parse_improvement_plan.__get__(real)
                 self._parse_race_strategy = real._parse_race_strategy.__get__(real)
+                self._parse_splits = real._parse_splits.__get__(real)
         return MockAnalyzer()
 
     def test_parse_clean_json(self):
@@ -240,6 +241,25 @@ class TestResponseParsing(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.split_pattern, "positive")
         self.assertEqual(len(result.speed_loss_zones), 1)
+
+    def test_parse_splits(self):
+        analyzer = self._make_analyzer_for_parsing()
+        response = json.dumps({
+            "start_time_s": 0.5,
+            "splits": [
+                {"distance_m": 5, "time_s": 3.0},
+                {"distance_m": 15, "time_s": 9.5}
+            ],
+            "finish_time_s": 25.4,
+            "confidence_notes": "Clear view of markers"
+        })
+        result = analyzer._parse_splits(response)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.start_time_s, 0.5)
+        self.assertEqual(result.finish_time_s, 25.4)
+        self.assertEqual(len(result.splits), 2)
+        self.assertEqual(result.splits[1].distance_m, 15)
+        self.assertEqual(result.splits[1].time_s, 9.5)
 
 
 class TestVideoSegments(unittest.TestCase):

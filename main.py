@@ -8,6 +8,9 @@ Build to .exe/.app: see build.spec and README.md
 import sys
 import os
 
+# Suppress harmless MediaPipe/TFLite C++ diagnostic logs
+os.environ["GLOG_minloglevel"] = "2"
+
 _SCRIPTS_PATH = r"C:\Users\SiddG\AppData\Local\Python\pythoncore-3.14-64\Scripts"
 if _SCRIPTS_PATH not in sys.path:
     sys.path.append(_SCRIPTS_PATH)
@@ -42,7 +45,7 @@ def main() -> int:
             background-color: #1e1e24;
             color: #f5f6fa;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            font-size: 14px;
+            font-size: 11pt;
         }
         QPushButton {
             background-color: #00a8ff;

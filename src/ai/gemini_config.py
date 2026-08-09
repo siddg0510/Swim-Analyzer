@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.1-pro"
 MAX_RETRIES = 3
 RETRY_DELAY_S = 2.0
 # Gemini charges per-token; keeping clips short saves cost and latency.
@@ -49,6 +49,7 @@ class GeminiConfig:
 # ---------------------------------------------------------------------------
 _CONFIG_DIR = Path.home() / ".swim_analyzer"
 _KEY_FILE = _CONFIG_DIR / "gemini_key.txt"
+_MODEL_FILE = _CONFIG_DIR / "gemini_model.txt"
 
 
 def _read_key_file() -> Optional[str]:
@@ -66,6 +67,13 @@ def save_api_key(key: str) -> None:
     logger.info("API key saved to %s", _KEY_FILE)
 
 
+def save_model(model: str) -> None:
+    """Persist the selected model to the local config file."""
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _MODEL_FILE.write_text(model.strip(), encoding="utf-8")
+    logger.info("Model saved to %s", _MODEL_FILE)
+
+
 def resolve_api_key(explicit_key: Optional[str] = None) -> Optional[str]:
     """Return the best available API key, or None if none is configured."""
     if explicit_key:
@@ -78,6 +86,17 @@ def resolve_api_key(explicit_key: Optional[str] = None) -> Optional[str]:
 
 def has_api_key() -> bool:
     return resolve_api_key() is not None
+
+
+def resolve_model(explicit_model: Optional[str] = None) -> str:
+    """Return the best available model, or the default."""
+    if explicit_model:
+        return explicit_model.strip()
+    if _MODEL_FILE.exists():
+        text = _MODEL_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return DEFAULT_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -111,5 +130,5 @@ def build_config(api_key: Optional[str] = None, model: Optional[str] = None) -> 
         raise RuntimeError("No Gemini API key available.")
     return GeminiConfig(
         api_key=key,
-        model=model or DEFAULT_MODEL,
+        model=resolve_model(model),
     )

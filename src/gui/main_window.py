@@ -14,7 +14,7 @@ from PySide6.QtGui import QIcon
 from ..vision.calibration import PoolCalibrator
 from ..config import resource_path, EVENTS, POOL_TYPES, GENDERS, STROKES
 from ..pipeline import AnalysisConfig, AnalysisWorker, AnalysisResult
-from .calibration_widget import CalibrationDialog
+from .calibration_widget import CalibrationDialog, ClickableImageLabel, _cv_frame_to_qpixmap
 from .dashboard import DashboardWidget
 
 CAP_COLOR_PRESETS = [
@@ -23,12 +23,12 @@ CAP_COLOR_PRESETS = [
 ]
 
 
-class APIKeyDialog(QDialog):
-    """Simple dialog for entering / updating the Gemini API key."""
+class AISettingsDialog(QDialog):
+    """Dialog for entering the Gemini API key and selecting the AI model."""
 
-    def __init__(self, parent=None, current_key: str = ""):
+    def __init__(self, parent=None, current_key: str = "", current_model: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Gemini API Key")
+        self.setWindowTitle("AI Settings")
         self.setMinimumWidth(480)
 
         layout = QVBoxLayout(self)
@@ -55,6 +55,18 @@ class APIKeyDialog(QDialog):
         )
         layout.addWidget(self.show_check)
 
+        layout.addWidget(QLabel("<b>Select AI Model</b><br>gemini-1.5-pro is recommended for video analysis."))
+        self.model_combo = QComboBox()
+        self.model_combo.addItems([
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.5-pro",
+        ])
+        if current_model:
+            self.model_combo.setCurrentText(current_model)
+        layout.addWidget(self.model_combo)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -64,6 +76,63 @@ class APIKeyDialog(QDialog):
 
     def get_key(self) -> str:
         return self.key_edit.text().strip()
+
+    def get_model(self) -> str:
+        return self.model_combo.currentText().strip()
+
+
+class ColorPickerDialog(QDialog):
+    def __init__(self, video_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pick Cap Color")
+        self.resize(1000, 700)
+        
+        self.color_hex = None
+        
+        cap = cv2.VideoCapture(video_path)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            QMessageBox.warning(self, "Error", "Could not read video.")
+            self.reject()
+            return
+            
+        self.frame = frame
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Click on the swimmer's cap to pick the color:"))
+        
+        from PySide6.QtWidgets import QScrollArea
+        
+        self.image_label = ClickableImageLabel(self._on_click)
+        self.image_label.setPixmap(_cv_frame_to_qpixmap(frame))
+        
+        scroll = QScrollArea()
+        scroll.setWidget(self.image_label)
+        layout.addWidget(scroll, stretch=1)
+        
+        self.color_preview = QLabel("Selected color: None")
+        self.color_preview.setMinimumHeight(30)
+        self.color_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.color_preview)
+        
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_click(self, x, y):
+        h, w = self.frame.shape[:2]
+        x, y = int(x), int(y)
+        if 0 <= x < w and 0 <= y < h:
+            b, g, r = self.frame[y, x]
+            self.color_hex = f"#{int(r):02X}{int(g):02X}{int(b):02X}"
+            self.color_preview.setText(f"Selected color: {self.color_hex}")
+            text_color = "black" if (int(r)+int(g)+int(b)) > 380 else "white"
+            self.color_preview.setStyleSheet(f"background-color: {self.color_hex}; color: {text_color}; font-weight: bold;")
 
 
 class MainWindow(QMainWindow):
@@ -81,11 +150,13 @@ class MainWindow(QMainWindow):
         self.lane_polygon = []
         self.worker: AnalysisWorker | None = None
         self._gemini_key: str | None = None
+        self._gemini_model: str | None = None
 
-        # Try to load saved API key
+        # Try to load saved API key and model
         try:
-            from ..ai.gemini_config import resolve_api_key
+            from ..ai.gemini_config import resolve_api_key, resolve_model
             self._gemini_key = resolve_api_key()
+            self._gemini_model = resolve_model()
         except Exception:
             pass
 
@@ -134,8 +205,12 @@ class MainWindow(QMainWindow):
         self.cap_combo.currentTextChanged.connect(
             lambda t: self.cap_hex_edit.setEnabled(t == "Custom hex…")
         )
+        self.pick_color_btn = QPushButton("Pick from video…")
+        self.pick_color_btn.clicked.connect(self._pick_color_from_video)
+        
         cap_row.addWidget(self.cap_combo)
         cap_row.addWidget(self.cap_hex_edit)
+        cap_row.addWidget(self.pick_color_btn)
         form.addRow("Swim cap colour:", cap_row)
 
         # Event details for AI analysis
@@ -179,7 +254,7 @@ class MainWindow(QMainWindow):
         self.api_key_status = QLabel(
             "✅ API key configured" if self._gemini_key else "❌ No API key"
         )
-        api_key_btn = QPushButton("Configure API Key…")
+        api_key_btn = QPushButton("AI Settings…")
         api_key_btn.clicked.connect(self._configure_api_key)
         key_row.addWidget(self.api_key_status)
         key_row.addStretch(1)
@@ -277,18 +352,32 @@ class MainWindow(QMainWindow):
                 f"Calibrated: {len(self.calibration_keyframes)} keyframes saved."
             )
 
+    def _pick_color_from_video(self) -> None:
+        if not self.video_path:
+            QMessageBox.warning(self, "No video", "Select a video first.")
+            return
+
+        dialog = ColorPickerDialog(self.video_path, parent=self)
+        if dialog.exec():
+            if dialog.color_hex:
+                self.cap_combo.setCurrentText("Custom hex…")
+                self.cap_hex_edit.setText(dialog.color_hex)
+
     def _configure_api_key(self) -> None:
-        dialog = APIKeyDialog(self, current_key=self._gemini_key or "")
+        dialog = AISettingsDialog(self, current_key=self._gemini_key or "", current_model=self._gemini_model or "")
         if dialog.exec():
             key = dialog.get_key()
+            model = dialog.get_model()
             if key:
                 self._gemini_key = key
+                self._gemini_model = model
                 try:
-                    from ..ai.gemini_config import save_api_key
+                    from ..ai.gemini_config import save_api_key, save_model
                     save_api_key(key)
+                    save_model(model)
                 except Exception:
                     pass
-                self.api_key_status.setText("✅ API key configured")
+                self.api_key_status.setText(f"✅ AI Ready ({model})")
                 self.ai_enabled_check.setChecked(True)
             else:
                 self._gemini_key = None
@@ -339,11 +428,14 @@ class MainWindow(QMainWindow):
         if not self.video_path:
             QMessageBox.warning(self, "No video", "Select a video first.")
             return
-        if not hasattr(self, 'calibration_keyframes') or not self.calibration_keyframes:
-            QMessageBox.warning(self, "Not calibrated", "Complete calibration first (at least 1 keyframe).")
-            return
-
         ai_enabled = self.ai_enabled_check.isChecked() and bool(self._gemini_key)
+
+        if not hasattr(self, 'calibration_keyframes') or not self.calibration_keyframes:
+            if not ai_enabled:
+                QMessageBox.warning(self, "Not calibrated", "Complete calibration first (or enable AI Auto-Calibration).")
+                return
+            else:
+                self.calibration_keyframes = []
 
         pool_type_text = self.pool_length_combo.currentText()
         if "50m" in pool_type_text:
@@ -364,6 +456,7 @@ class MainWindow(QMainWindow):
             # AI options
             enable_ai=ai_enabled,
             gemini_api_key=self._gemini_key if ai_enabled else None,
+            gemini_model=self._gemini_model if ai_enabled else None,
             stroke_override=self._get_stroke_override(),
             event_distance_m=self._get_event_distance(),
             pool_type=pool_type_text.split(" (")[0],

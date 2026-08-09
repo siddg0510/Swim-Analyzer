@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Data classes for analysis results
 # ---------------------------------------------------------------------------
+
+class ModelUnavailableError(Exception):
+    pass
+
 @dataclass
 class TechniqueElement:
     category: str
@@ -122,6 +126,20 @@ class RaceStrategy:
     stroke_rate_analysis: dict
     recommended_race_plan: dict
     raw_response: str = ""
+
+
+@dataclass
+class AISplitPoint:
+    distance_m: float
+    time_s: float
+
+
+@dataclass
+class AISplitData:
+    start_time_s: float | None
+    finish_time_s: float | None
+    splits: list[AISplitPoint]
+    confidence_notes: str
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +325,58 @@ class GeminiSwimAnalyzer:
             logger.error("Stroke identification failed: %s", e)
             return "unknown", 0.0
 
+    def detect_splits(
+        self,
+        video_path: str,
+        swimmer_identifier: str,
+        pool_length: float,
+    ) -> AISplitData | None:
+        """Use Gemini to identify exactly when the swimmer crosses distance markers."""
+        from .prompts import SPLIT_DETECTION_PROMPT, SYSTEM_INSTRUCTION
+
+        try:
+            video_file = self._upload_video(video_path)
+            if video_file is None:
+                return None
+
+            prompt = SPLIT_DETECTION_PROMPT.format(
+                swimmer_identifier=swimmer_identifier,
+                pool_length=pool_length,
+            )
+
+            response = self._generate(video_file, prompt, SYSTEM_INSTRUCTION)
+            if response is None:
+                return None
+
+            return self._parse_splits(response)
+
+        except ModelUnavailableError:
+            raise
+        except Exception as e:
+            logger.error("Split detection failed: %s", e, exc_info=True)
+            return None
+
+    def _parse_splits(self, response: str) -> AISplitData | None:
+        data = self._safe_parse_json(response)
+        if not data:
+            return None
+
+        splits = []
+        for s in data.get("splits", []):
+            dist = float(s.get("distance_m", 0))
+            time_val = float(s.get("time_s", 0))
+            splits.append(AISplitPoint(distance_m=dist, time_s=time_val))
+            
+        # Ensure splits are sorted by time
+        splits.sort(key=lambda x: x.time_s)
+
+        return AISplitData(
+            start_time_s=data.get("start_time_s"),
+            finish_time_s=data.get("finish_time_s"),
+            splits=splits,
+            confidence_notes=data.get("confidence_notes", ""),
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -355,7 +425,11 @@ class GeminiSwimAnalyzer:
                 logger.warning("Empty response on attempt %d", attempt + 1)
 
             except Exception as e:
-                logger.warning("API call attempt %d failed: %s", attempt + 1, e)
+                error_str = str(e)
+                logger.warning("API call attempt %d failed: %s", attempt + 1, error_str)
+                if "404 NOT_FOUND" in error_str or "is no longer available" in error_str:
+                    raise ModelUnavailableError(f"Model {self.config.model} is not available. Please change your AI settings.")
+                    
                 if attempt < self.config.max_retries - 1:
                     time.sleep(self.config.retry_delay_s * (attempt + 1))
 
