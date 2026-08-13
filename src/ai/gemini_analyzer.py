@@ -142,6 +142,14 @@ class AISplitData:
     confidence_notes: str
 
 
+@dataclass
+class AICalibrationResult:
+    lane_polygon_px: list[tuple[float, float]]
+    reference_points: list[tuple[tuple[float, float], float]]
+    confidence: float
+    notes: str
+
+
 # ---------------------------------------------------------------------------
 # Main analyzer class
 # ---------------------------------------------------------------------------
@@ -356,6 +364,110 @@ class GeminiSwimAnalyzer:
             logger.error("Split detection failed: %s", e, exc_info=True)
             return None
 
+    def detect_pool_calibration(
+        self,
+        video_path: str,
+        pool_length_m: float,
+        sample_time_s: float = 3.0,
+    ) -> AICalibrationResult | None:
+        """Use Gemini to identify the lane boundaries and real-world reference points from a single frame."""
+        from .prompts import POOL_CALIBRATION_PROMPT, SYSTEM_INSTRUCTION
+        import cv2
+        import tempfile
+
+        try:
+            # 1. Extract a single frame as JPEG
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return None
+            
+            # Try to grab a frame at sample_time_s
+            cap.set(cv2.CAP_PROP_POS_MSEC, sample_time_s * 1000)
+            ok, frame = cap.read()
+            if not ok:
+                # Fallback to first frame
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = cap.read()
+                
+            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+
+            if not ok:
+                return None
+
+            # 2. Write to temp JPEG
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                temp_path = tf.name
+            
+            cv2.imwrite(temp_path, frame)
+
+            try:
+                # 3. Upload image (much faster than video)
+                logger.info("Uploading single frame to Gemini for calibration: %s", temp_path)
+                img_file = self.client.files.upload(file=temp_path)
+                self._uploaded_files.append(img_file)
+
+                # Wait for active
+                retries = 0
+                while img_file.state.name == "PROCESSING":
+                    if retries > 30:
+                        return None
+                    time.sleep(2)
+                    img_file = self.client.files.get(name=img_file.name)
+                    retries += 1
+
+                if img_file.state.name == "FAILED":
+                    return None
+
+                prompt = POOL_CALIBRATION_PROMPT.format(
+                    pool_length=pool_length_m,
+                    frame_width=frame_width,
+                    frame_height=frame_height
+                )
+
+                response = self._generate(img_file, prompt, SYSTEM_INSTRUCTION)
+                if response is None:
+                    return None
+
+                data = self._safe_parse_json(response)
+                if not data:
+                    return None
+
+                # 4. Parse result
+                lane_px = []
+                for p in data.get("lane_polygon_px", []):
+                    lane_px.append((float(p.get("x", 0)), float(p.get("y", 0))))
+
+                ref_pts = []
+                for p in data.get("reference_points", []):
+                    ref_pts.append(
+                        ((float(p.get("x", 0)), float(p.get("y", 0))), float(p.get("distance_m", 0)))
+                    )
+
+                conf = float(data.get("confidence", 0.0))
+                if conf < 0.4 or len(ref_pts) < 2:
+                    return None
+
+                return AICalibrationResult(
+                    lane_polygon_px=lane_px,
+                    reference_points=ref_pts,
+                    confidence=conf,
+                    notes=data.get("notes", "")
+                )
+            finally:
+                import os
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        except ModelUnavailableError:
+            raise
+        except Exception as e:
+            logger.error("Pool calibration detection failed: %s", e, exc_info=True)
+            return None
+
     def _parse_splits(self, response: str) -> AISplitData | None:
         data = self._safe_parse_json(response)
         if not data:
@@ -410,6 +522,7 @@ class GeminiSwimAnalyzer:
 
     def _generate(self, video_file, prompt: str, system_instruction: str) -> str | None:
         """Send a generation request with retry logic."""
+        import re
         for attempt in range(self.config.max_retries):
             try:
                 response = self.client.models.generate_content(
@@ -431,7 +544,18 @@ class GeminiSwimAnalyzer:
                     raise ModelUnavailableError(f"Model {self.config.model} is not available. Please change your AI settings.")
                     
                 if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay_s * (attempt + 1))
+                    wait_time = self.config.retry_delay_s * (attempt + 1)
+                    if "429" in error_str and "RESOURCE_EXHAUSTED" in error_str:
+                        match = re.search(r"Please retry in ([\d\.]+)s", error_str)
+                        if not match:
+                            match = re.search(r"'retryDelay':\s*'(\d+)s'", error_str)
+                        if match:
+                            wait_time = max(wait_time, float(match.group(1)) + 1.0)
+                        else:
+                            wait_time = max(wait_time, 20.0)
+                    
+                    logger.info("Waiting %.1fs before attempt %d...", wait_time, attempt + 2)
+                    time.sleep(wait_time)
 
         return None
 

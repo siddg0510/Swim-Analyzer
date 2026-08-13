@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "gemini-3.1-pro"
+DEFAULT_MODEL = "gemini-2.5-flash"
 MAX_RETRIES = 3
 RETRY_DELAY_S = 2.0
 # Gemini charges per-token; keeping clips short saves cost and latency.

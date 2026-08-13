@@ -372,3 +372,38 @@ Respond with this exact JSON structure:
     "finish_time_s": <timestamp of the final wall touch in seconds (float), or null if not reached>,
     "confidence_notes": "<Brief note on how visible the markers were and if any estimates were required>"
 }}"""
+
+
+# ---------------------------------------------------------------------------
+# Pool Calibration (Auto-Calibration)
+# ---------------------------------------------------------------------------
+POOL_CALIBRATION_PROMPT = """You are analyzing a swimming pool video frame to extract calibration data.
+
+The pool has a length of {pool_length}m. The frame dimensions are {frame_width}×{frame_height} pixels.
+
+Your task:
+1. LANE POLYGON: Identify the 4 corners of the swimmer's lane (the rectangular region where the swimmer moves).
+   Return them in clockwise order starting from the top-left.
+2. REFERENCE POINTS: Identify pixel locations that correspond to known real-world distances along the pool:
+   - The start wall (0m) if visible
+   - The end/turn wall ({pool_length}m) if visible
+   - Backstroke flags (~5m from each wall) if visible — these are typically a string of triangular flags hanging across the pool
+   - Distance markers on the lane rope (colored knots/floats at 5m, 15m intervals) if visible
+
+For each reference point, provide the pixel x,y coordinate and the distance_m it represents.
+Only include reference points you can identify with confidence.
+
+Respond with this exact JSON:
+{{
+    "lane_polygon_px": [
+        {{"x": <int>, "y": <int>}},
+        {{"x": <int>, "y": <int>}},
+        {{"x": <int>, "y": <int>}},
+        {{"x": <int>, "y": <int>}}
+    ],
+    "reference_points": [
+        {{"x": <int>, "y": <int>, "distance_m": <float>, "landmark": "<what you identified>"}}
+    ],
+    "confidence": <0.0-1.0>,
+    "notes": "<brief description of what landmarks were visible>"
+}}"""

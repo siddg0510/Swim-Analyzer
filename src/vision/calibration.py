@@ -39,6 +39,8 @@ class CalibrationKeyframe:
     frame_idx: int
     reference_points: list[tuple[tuple[float, float], float]]
     lane_polygon_px: list[tuple[float, float]]
+    cap_color: str | None = None
+    lane_number: int | None = None
 
 
 @dataclass

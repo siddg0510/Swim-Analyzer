@@ -54,7 +54,7 @@ class TestGeminiConfig(unittest.TestCase):
             del os.environ["GEMINI_API_KEY"]
 
     def test_default_model(self):
-        self.assertEqual(DEFAULT_MODEL, "gemini-3.1-pro")
+        self.assertEqual(DEFAULT_MODEL, "gemini-2.5-flash")
 
     def test_config_dataclass(self):
         cfg = GeminiConfig(api_key="test", model="gemini-3.1-pro")

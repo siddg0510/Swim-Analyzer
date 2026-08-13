@@ -234,6 +234,47 @@ def test_full_synthetic_video_pipeline_pieces():
           round(report.total_time_s, 2), "s vs true", round(duration_s, 2), "s)")
 
 
+def test_calibration_keyframe_serialization():
+    from src.vision.calibration import CalibrationKeyframe
+    import dataclasses
+    
+    # Test old style (no cap_color or lane_number)
+    kf_old = CalibrationKeyframe(
+        frame_idx=10,
+        reference_points=[((1.0, 2.0), 5.0)],
+        lane_polygon_px=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    )
+    assert kf_old.cap_color is None
+    assert kf_old.lane_number is None
+    
+    # Test new style
+    kf_new = CalibrationKeyframe(
+        frame_idx=15,
+        reference_points=[((10.0, 20.0), 25.0)],
+        lane_polygon_px=[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        cap_color="#FF0000",
+        lane_number=5
+    )
+    assert kf_new.cap_color == "#FF0000"
+    assert kf_new.lane_number == 5
+    
+    # Test to dict and from dict
+    d = dataclasses.asdict(kf_new)
+    kf_restored = CalibrationKeyframe(**d)
+    assert kf_restored.cap_color == "#FF0000"
+    assert kf_restored.lane_number == 5
+    
+    # Test backward compatibility deserialization
+    d_old = dataclasses.asdict(kf_old)
+    # Remove the None defaults as if loaded from old JSON
+    del d_old["cap_color"]
+    del d_old["lane_number"]
+    
+    kf_old_restored = CalibrationKeyframe(**d_old)
+    assert kf_old_restored.cap_color is None
+    assert kf_old_restored.lane_number is None
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     failed = 0

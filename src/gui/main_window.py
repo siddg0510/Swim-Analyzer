@@ -12,15 +12,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 
 from ..vision.calibration import PoolCalibrator
-from ..config import resource_path, EVENTS, POOL_TYPES, GENDERS, STROKES
+from ..config import resource_path, EVENTS, POOL_TYPES, GENDERS, STROKES, CAP_COLOR_PRESETS
 from ..pipeline import AnalysisConfig, AnalysisWorker, AnalysisResult
 from .calibration_widget import CalibrationDialog, ClickableImageLabel, _cv_frame_to_qpixmap
 from .dashboard import DashboardWidget
-
-CAP_COLOR_PRESETS = [
-    "red", "orange", "yellow", "green", "neon green", "olive", "dark green", "cyan", "blue",
-    "navy", "purple", "pink", "white", "black", "silver", "gray", "Custom hex…",
-]
 
 
 class AISettingsDialog(QDialog):
@@ -55,13 +50,13 @@ class AISettingsDialog(QDialog):
         )
         layout.addWidget(self.show_check)
 
-        layout.addWidget(QLabel("<b>Select AI Model</b><br>gemini-1.5-pro is recommended for video analysis."))
+        layout.addWidget(QLabel("<b>Select AI Model</b><br>gemini-3.6-flash is recommended for video analysis."))
         self.model_combo = QComboBox()
         self.model_combo.addItems([
-            "gemini-1.5-pro",
-            "gemini-1.5-flash",
-            "gemini-2.0-flash",
+            "gemini-3.6-flash",
+            "gemini-2.5-flash",
             "gemini-2.5-pro",
+            "gemini-2.0-flash",
         ])
         if current_model:
             self.model_combo.setCurrentText(current_model)
@@ -79,60 +74,6 @@ class AISettingsDialog(QDialog):
 
     def get_model(self) -> str:
         return self.model_combo.currentText().strip()
-
-
-class ColorPickerDialog(QDialog):
-    def __init__(self, video_path: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Pick Cap Color")
-        self.resize(1000, 700)
-        
-        self.color_hex = None
-        
-        cap = cv2.VideoCapture(video_path)
-        ret, frame = cap.read()
-        cap.release()
-        
-        if not ret:
-            QMessageBox.warning(self, "Error", "Could not read video.")
-            self.reject()
-            return
-            
-        self.frame = frame
-        
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Click on the swimmer's cap to pick the color:"))
-        
-        from PySide6.QtWidgets import QScrollArea
-        
-        self.image_label = ClickableImageLabel(self._on_click)
-        self.image_label.setPixmap(_cv_frame_to_qpixmap(frame))
-        
-        scroll = QScrollArea()
-        scroll.setWidget(self.image_label)
-        layout.addWidget(scroll, stretch=1)
-        
-        self.color_preview = QLabel("Selected color: None")
-        self.color_preview.setMinimumHeight(30)
-        self.color_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.color_preview)
-        
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _on_click(self, x, y):
-        h, w = self.frame.shape[:2]
-        x, y = int(x), int(y)
-        if 0 <= x < w and 0 <= y < h:
-            b, g, r = self.frame[y, x]
-            self.color_hex = f"#{int(r):02X}{int(g):02X}{int(b):02X}"
-            self.color_preview.setText(f"Selected color: {self.color_hex}")
-            text_color = "black" if (int(r)+int(g)+int(b)) > 380 else "white"
-            self.color_preview.setStyleSheet(f"background-color: {self.color_hex}; color: {text_color}; font-weight: bold;")
 
 
 class MainWindow(QMainWindow):
@@ -205,13 +146,14 @@ class MainWindow(QMainWindow):
         self.cap_combo.currentTextChanged.connect(
             lambda t: self.cap_hex_edit.setEnabled(t == "Custom hex…")
         )
-        self.pick_color_btn = QPushButton("Pick from video…")
-        self.pick_color_btn.clicked.connect(self._pick_color_from_video)
         
         cap_row.addWidget(self.cap_combo)
         cap_row.addWidget(self.cap_hex_edit)
-        cap_row.addWidget(self.pick_color_btn)
         form.addRow("Swim cap colour:", cap_row)
+        
+        note_label = QLabel("<i>(Can also be set per-keyframe in Calibration)</i>")
+        note_label.setStyleSheet("color: gray;")
+        form.addRow("", note_label)
 
         # Event details for AI analysis
         self.event_combo = QComboBox()
@@ -325,7 +267,7 @@ class MainWindow(QMainWindow):
             self.video_path = path
             self.video_label.setText(path)
             self.calibration_keyframes = []
-            self.calib_status.setText("Not calibrated yet.")
+            self._update_calibration_status()
 
     def _browse_reference_video(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -346,22 +288,24 @@ class MainWindow(QMainWindow):
             return
 
         dialog = CalibrationDialog(self.video_path, parent=self)
+        # Pass the main page cap color to the dialog
+        dialog.set_default_cap_color(self._get_cap_color())
+        
         if dialog.exec():
             self.calibration_keyframes = dialog.get_calibration_keyframes()
-            self.calib_status.setText(
-                f"Calibrated: {len(self.calibration_keyframes)} keyframes saved."
-            )
-
-    def _pick_color_from_video(self) -> None:
-        if not self.video_path:
-            QMessageBox.warning(self, "No video", "Select a video first.")
-            return
-
-        dialog = ColorPickerDialog(self.video_path, parent=self)
-        if dialog.exec():
-            if dialog.color_hex:
-                self.cap_combo.setCurrentText("Custom hex…")
-                self.cap_hex_edit.setText(dialog.color_hex)
+            self._update_calibration_status()
+            
+            # If any keyframe has a cap color, update the main page to match
+            for kf in self.calibration_keyframes:
+                if kf.cap_color:
+                    if kf.cap_color.startswith("#"):
+                        self.cap_combo.setCurrentText("Custom hex…")
+                        self.cap_hex_edit.setText(kf.cap_color)
+                    else:
+                        idx = self.cap_combo.findText(kf.cap_color)
+                        if idx >= 0:
+                            self.cap_combo.setCurrentIndex(idx)
+                    break
 
     def _configure_api_key(self) -> None:
         dialog = AISettingsDialog(self, current_key=self._gemini_key or "", current_model=self._gemini_model or "")
@@ -379,16 +323,27 @@ class MainWindow(QMainWindow):
                     pass
                 self.api_key_status.setText(f"✅ AI Ready ({model})")
                 self.ai_enabled_check.setChecked(True)
+                self._update_calibration_status()
             else:
                 self._gemini_key = None
                 self.api_key_status.setText("❌ No API key")
                 self.ai_enabled_check.setChecked(False)
+                self._update_calibration_status()
 
     def _on_ai_toggle(self, checked: bool) -> None:
         if checked and not self._gemini_key:
             self._configure_api_key()
             if not self._gemini_key:
                 self.ai_enabled_check.setChecked(False)
+        self._update_calibration_status()
+
+    def _update_calibration_status(self) -> None:
+        if hasattr(self, 'calibration_keyframes') and self.calibration_keyframes:
+            self.calib_status.setText(f"Calibrated: {len(self.calibration_keyframes)} keyframes saved.")
+        elif self.ai_enabled_check.isChecked() and self._gemini_key:
+            self.calib_status.setText("🤖 AI Auto-Calibration will run at analysis time")
+        else:
+            self.calib_status.setText("Not calibrated yet.")
 
     def _get_cap_color(self) -> str:
         choice = self.cap_combo.currentText()
@@ -436,6 +391,11 @@ class MainWindow(QMainWindow):
                 return
             else:
                 self.calibration_keyframes = []
+        else:
+            # Check if any keyframe has a valid lane polygon
+            has_valid_polygon = any(len(kf.lane_polygon_px) >= 3 for kf in self.calibration_keyframes)
+            if not has_valid_polygon and not ai_enabled:
+                QMessageBox.warning(self, "Warning", "Lane boundaries not drawn — tracking may pick up swimmers from adjacent lanes.")
 
         pool_type_text = self.pool_length_combo.currentText()
         if "50m" in pool_type_text:

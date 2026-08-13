@@ -141,20 +141,35 @@ class AnalysisWorker(QThread):
 
         if not keyframes:
             if cfg.enable_ai and cfg.gemini_api_key:
-                self.progress.emit(7, "🤖 AI Auto-Calibration: Detecting pool markers…")
+                self.progress.emit(7, "🤖 AI Auto-Calibration: Detecting pool geometry…")
                 from .ai.gemini_analyzer import GeminiSwimAnalyzer
                 analyzer = GeminiSwimAnalyzer(api_key=cfg.gemini_api_key, model=cfg.gemini_model)
+                
+                ai_calib = analyzer.detect_pool_calibration(
+                    cfg.video_path, cfg.pool_length_m
+                )
+                
+                self.progress.emit(8, "🤖 AI Auto-Calibration: Detecting split timestamps…")
                 ai_splits = analyzer.detect_splits(cfg.video_path, f"with {cfg.cap_color} cap", cfg.pool_length_m)
                 analyzer.cleanup()
 
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
-            dummy_kf = CalibrationKeyframe(
-                frame_idx=0,
-                reference_points=[],
-                lane_polygon_px=[(0, 0), (w, 0), (w, h), (0, h)]
-            )
-            keyframes = [dummy_kf]
+                if ai_calib and len(ai_calib.reference_points) >= 2:
+                    auto_kf = CalibrationKeyframe(
+                        frame_idx=0,
+                        reference_points=ai_calib.reference_points,
+                        lane_polygon_px=ai_calib.lane_polygon_px,
+                    )
+                    keyframes = [auto_kf]
+
+            if not keyframes:
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+                dummy_kf = CalibrationKeyframe(
+                    frame_idx=0,
+                    reference_points=[],
+                    lane_polygon_px=[(0, 0), (w, 0), (w, h), (0, h)]
+                )
+                keyframes = [dummy_kf]
 
         current_kf_idx = 0
         active_kf = keyframes[0]
@@ -165,7 +180,8 @@ class AnalysisWorker(QThread):
                 calibrator.add_point(pixel, dist)
             calibrator.solve()
 
-        tracker = CapTracker(cfg.cap_color, active_kf.lane_polygon_px)
+        initial_color = active_kf.cap_color or cfg.cap_color
+        tracker = CapTracker(initial_color, active_kf.lane_polygon_px)
         pose_estimator = PoseEstimator()
 
         frames_cache: dict[int, np.ndarray] = {}
@@ -203,8 +219,11 @@ class AnalysisWorker(QThread):
                     calibrator.add_point(pixel, dist)
                 calibrator.solve()
                 
-                # Update lane constraints for cap tracker
-                tracker.lane_polygon = np.array(active_kf.lane_polygon_px, dtype=np.int32)
+                # Update lane constraints and cap color for cap tracker
+                if active_kf.cap_color:
+                    tracker = CapTracker(active_kf.cap_color, active_kf.lane_polygon_px)
+                else:
+                    tracker.lane_polygon = np.array(active_kf.lane_polygon_px, dtype=np.int32)
                 
                 # Force EgoMotionTracker to re-initialize on this frame, anchoring drift to 0
                 ego_tracker = None
@@ -286,7 +305,8 @@ class AnalysisWorker(QThread):
                     for pixel, dist in kf.reference_points:
                         calib.add_point(pixel, dist)
                     calib.solve()
-                return calib.pixel_to_distance(x, y)
+                    return calib.pixel_to_distance(x, y)
+                return 0.0
 
         # 1. Compute offsets per frame to eliminate calibration jumps
         frame_offsets: dict[int, float] = {}

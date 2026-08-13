@@ -103,3 +103,8 @@ GENDERS = ["male", "female"]
 # race video (Gemini focuses on visible technique rather than processing
 # minutes of footage).
 AI_MAX_CLIP_DURATION_S = 60
+
+CAP_COLOR_PRESETS = [
+    "red", "orange", "yellow", "green", "neon green", "olive", "dark green", "cyan", "blue",
+    "navy", "purple", "pink", "white", "black", "silver", "gray", "Custom hex…",
+]
