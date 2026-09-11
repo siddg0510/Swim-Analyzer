@@ -258,5 +258,26 @@ class TestBuildEliteContext(unittest.TestCase):
         self.assertIn("Ideal butterfly technique model", context)
 
 
+class TestJSONBenchmarkLoading(unittest.TestCase):
+    """Test external JSON benchmark dataset loading and precision flagging."""
+
+    def test_precision_flags_present(self):
+        precisions = {b.precision for b in BENCHMARKS}
+        self.assertIn("verified", precisions)
+        self.assertIn("low_precision", precisions)
+
+    def test_retrieved_date_present(self):
+        dates = [b.retrieved_date for b in BENCHMARKS if b.retrieved_date]
+        self.assertGreater(len(dates), 0)
+
+    def test_load_benchmarks_from_json_direct(self):
+        from src.analysis.benchmarks import load_benchmarks_from_json
+        bench, profs, convs, techs = load_benchmarks_from_json()
+        self.assertGreaterEqual(len(bench), 20)
+        self.assertGreaterEqual(len(profs), 8)
+        self.assertGreaterEqual(len(convs), 3)
+        self.assertEqual(len(techs), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

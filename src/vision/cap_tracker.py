@@ -100,8 +100,24 @@ def hex_or_keyword_to_hsv_ranges(color: str) -> list[tuple[np.ndarray, np.ndarra
     return ranges
 
 
+CAP_PHASE_Q = {
+    "steady":   np.diag([1.0, 1.0, 5.0, 5.0]).astype(np.float32),
+    "start":    np.diag([4.0, 4.0, 25.0, 25.0]).astype(np.float32),
+    "turn":     np.diag([4.0, 4.0, 25.0, 25.0]).astype(np.float32),
+    "breakout": np.diag([2.0, 2.0, 15.0, 15.0]).astype(np.float32),
+}
+
+
 class KalmanPointTracker:
-    """Constant-velocity 2D Kalman filter, used to bridge splash occlusion."""
+    """Constant-velocity 2D Kalman filter with Mahalanobis gating.
+
+    The gating rejects implausible measurements (e.g., splash artifacts
+    matching the cap color at wrong locations) instead of accepting
+    whatever the detector returns unconditionally.
+    """
+
+    # Chi-squared threshold for 2 DOF at p=0.99
+    DEFAULT_GATE_THRESHOLD: float = 9.21
 
     def __init__(self) -> None:
         self.kf = cv2.KalmanFilter(4, 2)
@@ -120,15 +136,27 @@ class KalmanPointTracker:
         # its own constant-velocity assumption ~400x more than new
         # detections and effectively never learn velocity — caught by
         # test_kalman_bridges_occlusion, fixed by rebalancing these two.
-        self.kf.processNoiseCov = np.diag([1.0, 1.0, 5.0, 5.0]).astype(np.float32)
+        self.kf.processNoiseCov = CAP_PHASE_Q["steady"].copy()
+        self._current_phase = "steady"
         self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 4.0
-        self.kf.errorCovPost = np.eye(4, dtype=np.float32) * 10.0
+        self.kf.errorCovPost = np.diag([10.0, 10.0, 400.0, 400.0]).astype(np.float32)
         self._initialized = False
+        self._coast_frames = 0
+        self._frames_tracked = 0
+
+    def set_phase(self, phase: str) -> None:
+        """Set the swim phase to adjust process noise accordingly."""
+        if phase in CAP_PHASE_Q and phase != self._current_phase:
+            self.kf.processNoiseCov = CAP_PHASE_Q[phase].copy()
+            self._current_phase = phase
 
     def init(self, x: float, y: float) -> None:
         self.kf.statePre = np.array([[x], [y], [0], [0]], np.float32)
         self.kf.statePost = np.array([[x], [y], [0], [0]], np.float32)
+        self.kf.errorCovPost = np.diag([10.0, 10.0, 400.0, 400.0]).astype(np.float32)
         self._initialized = True
+        self._coast_frames = 0
+        self._frames_tracked = 1
 
     def step(self, measurement: tuple[float, float] | None) -> tuple[float, float]:
         """
@@ -151,8 +179,72 @@ class KalmanPointTracker:
         pred = self.kf.predict()
         if measurement is not None:
             c = self.kf.correct(np.array([[measurement[0]], [measurement[1]]], np.float32))
+            self._coast_frames = 0
+            self._frames_tracked += 1
             return float(c[0, 0]), float(c[1, 0])
+        self._coast_frames += 1
+        self.kf.errorCovPost *= 1.05
         return float(pred[0, 0]), float(pred[1, 0])
+
+    def gated_step(
+        self,
+        measurement: tuple[float, float] | None,
+        gate_threshold: float | None = None,
+    ) -> tuple[float, float, bool]:
+        """
+        Like step(), but applies Mahalanobis distance gating to the
+        measurement. Returns (x, y, accepted) where accepted is False
+        if the measurement was rejected as statistically implausible.
+
+        When rejected, the filter uses prediction only (as if no
+        measurement was available).
+        """
+        if not self._initialized:
+            if measurement is None:
+                return float("nan"), float("nan"), False
+            self.init(*measurement)
+            return measurement[0], measurement[1], True
+
+        threshold = gate_threshold or self.DEFAULT_GATE_THRESHOLD
+
+        pred = self.kf.predict()
+
+        if measurement is None:
+            self._coast_frames += 1
+            self.kf.errorCovPost *= 1.05
+            return float(pred[0, 0]), float(pred[1, 0]), False
+
+        # Compute Mahalanobis distance
+        H = self.kf.measurementMatrix
+        z = np.array([[measurement[0]], [measurement[1]]], np.float32)
+        z_pred = H @ self.kf.statePre
+        innovation = z - z_pred
+
+        P_pred = self.kf.errorCovPre
+        R = self.kf.measurementNoiseCov
+        S = H @ P_pred @ H.T + R
+
+        try:
+            S_inv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            c = self.kf.correct(z)
+            self._coast_frames = 0
+            self._frames_tracked += 1
+            return float(c[0, 0]), float(c[1, 0]), True
+
+        mahal_dist_sq = float((innovation.T @ S_inv @ innovation)[0, 0])
+
+        if self._frames_tracked >= 3 and mahal_dist_sq > threshold:
+            # Reject — use prediction
+            self._coast_frames += 1
+            self.kf.errorCovPost *= 1.05
+            return float(pred[0, 0]), float(pred[1, 0]), False
+
+        # Accept
+        c = self.kf.correct(z)
+        self._coast_frames = 0
+        self._frames_tracked += 1
+        return float(c[0, 0]), float(c[1, 0]), True
 
     # Back-compat aliases used by a couple of call sites that only ever
     # need one half of step().
@@ -161,6 +253,11 @@ class KalmanPointTracker:
 
     def correct(self, x: float, y: float) -> tuple[float, float]:
         return self.step((x, y))
+
+    @property
+    def coast_frames(self) -> int:
+        """Number of consecutive frames without a valid measurement."""
+        return self._coast_frames
 
 
 class CapTracker:
@@ -173,7 +270,12 @@ class CapTracker:
     when an adjacent-lane swimmer wears a similar cap colour.
     """
 
-    def __init__(self, cap_color: str, lane_polygon: list[tuple[float, float]] | None):
+    def __init__(
+        self,
+        cap_color: str,
+        lane_polygon: list[tuple[float, float]] | None,
+        recovery_agent: object | None = None,
+    ):
         self.hsv_ranges = hex_or_keyword_to_hsv_ranges(cap_color)
         self.lane_polygon = (
             np.array(lane_polygon, dtype=np.int32) if lane_polygon else None
@@ -182,6 +284,12 @@ class CapTracker:
         self.last_good: tuple[float, float] | None = None
         self.min_contour_area = 100  # px^2; increased from 25 to reject tiny noise
         self.max_contour_area = 5000 # reject huge blobs (e.g. half the pool)
+        self._recovery = recovery_agent
+        self._coast_buffer: list[np.ndarray] = []
+
+    def set_phase(self, phase: str) -> None:
+        """Set the swim phase for adaptive Kalman process noise."""
+        self.kalman.set_phase(phase)
 
     def _in_lane(self, x: float, y: float) -> bool:
         if self.lane_polygon is None:
@@ -242,11 +350,47 @@ class CapTracker:
         det = self.detect(frame_bgr)
         if det is not None:
             x, y, conf = det
-            fx, fy = self.kalman.correct(x, y)
-            self.last_good = (x, y)
-            return TrackedPoint(frame_idx, fx, fy, conf, source="color")
+            fx, fy, accepted = self.kalman.gated_step((x, y))
+            if accepted:
+                self.last_good = (x, y)
+                self._coast_buffer.clear()
+                return TrackedPoint(frame_idx, fx, fy, conf, source="color")
+            else:
+                # Measurement rejected by Mahalanobis gate — treat as splash
+                self._coast_buffer.append(frame_bgr.copy())
+                if len(self._coast_buffer) > 90:
+                    self._coast_buffer = self._coast_buffer[-60:]
+                return TrackedPoint(frame_idx, fx, fy, confidence=0.15, source="kalman_predict")
         else:
-            px, py = self.kalman.predict()
+            px, py, _ = self.kalman.gated_step(None)
+            self._coast_buffer.append(frame_bgr.copy())
+            if len(self._coast_buffer) > 90:
+                self._coast_buffer = self._coast_buffer[-60:]
+
+            # Prolonged splash occlusion: ask Gemini for recovery if available
+            if (
+                self.kalman.coast_frames > 10
+                and self._recovery is not None
+                and getattr(self._recovery, "available", False)
+            ):
+                recovery = None
+                if len(self._coast_buffer) >= 3:
+                    recovery = self._recovery.locate_swimmer_in_segment(
+                        self._coast_buffer, fps=30.0
+                    )
+                if recovery is None:
+                    recovery = self._recovery.locate_swimmer(frame_bgr)
+
+                if recovery is not None:
+                    rx, ry = self.kalman.correct(recovery.x, recovery.y)
+                    self.last_good = (rx, ry)
+                    self._coast_buffer.clear()
+                    return TrackedPoint(
+                        frame_idx, rx, ry,
+                        confidence=recovery.confidence,
+                        source="gemini_recovery",
+                    )
+
             return TrackedPoint(frame_idx, px, py, confidence=0.15, source="kalman_predict")
 
 

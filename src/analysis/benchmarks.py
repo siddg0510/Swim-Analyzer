@@ -25,7 +25,9 @@ SOURCING POLICY:
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
@@ -51,6 +53,8 @@ class BenchmarkEntry:
     stroke_length_m: float | None
     breakout_distance_m: float | None
     source: str
+    precision: str = "verified"  # "verified" or "low_precision"
+    retrieved_date: str | None = None
 
 
 @dataclass
@@ -64,6 +68,7 @@ class EliteSwimmerProfile:
     technique_signature: str  # What makes their technique elite
     race_data: dict  # Event → RaceMetrics
     coaching_notes: str  # Key coaching insights about their style
+    retrieved_date: str | None = None
 
 
 @dataclass
@@ -99,7 +104,7 @@ MAX_UNDERWATER_DISTANCE_M = {
     "breaststroke": None,  # different rule shape; not a simple distance cap
 }
 
-RACE_SEGMENT_CONVENTIONS: list[RaceSegmentConvention] = [
+_BUILTIN_RACE_SEGMENT_CONVENTIONS: list[RaceSegmentConvention] = [
     RaceSegmentConvention(
         name="finish / turn-in segment (last 5 m)",
         boundaries_m=(-5.0, 0.0),
@@ -153,7 +158,7 @@ SR_SL_EMPHASIS_SOURCE = (
 # (B) Comprehensive performance benchmarks by event
 # ---------------------------------------------------------------------------
 
-BENCHMARKS: list[BenchmarkEntry] = [
+_BUILTIN_BENCHMARKS: list[BenchmarkEntry] = [
     # -- FREESTYLE --
     BenchmarkEntry(
         stroke="freestyle", distance_m=50, sex="male",
@@ -334,7 +339,7 @@ BENCHMARKS: list[BenchmarkEntry] = [
 # Elite swimmer profiles for Gemini AI comparison
 # ---------------------------------------------------------------------------
 
-ELITE_PROFILES: dict[str, EliteSwimmerProfile] = {
+_BUILTIN_ELITE_PROFILES: dict[str, EliteSwimmerProfile] = {
     "pan_zhanle": EliteSwimmerProfile(
         name="Pan Zhanle",
         country="China",
@@ -722,7 +727,7 @@ ELITE_PROFILES: dict[str, EliteSwimmerProfile] = {
 # Technique models for each stroke (used in AI prompts)
 # ---------------------------------------------------------------------------
 
-TECHNIQUE_MODELS: dict[str, TechniqueModel] = {
+_BUILTIN_TECHNIQUE_MODELS: dict[str, TechniqueModel] = {
     "freestyle": TechniqueModel(
         stroke="freestyle",
         key_elements={
@@ -929,6 +934,112 @@ TECHNIQUE_MODELS: dict[str, TechniqueModel] = {
         ],
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# External JSON loader with graceful fallback to built-in datasets
+# ---------------------------------------------------------------------------
+
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "benchmarks"
+_BENCHMARK_JSON_PATH = _DATA_DIR / "elite_benchmarks.json"
+
+
+def load_benchmarks_from_json(json_path: Path | str | None = None) -> tuple[
+    list[BenchmarkEntry],
+    dict[str, EliteSwimmerProfile],
+    list[RaceSegmentConvention],
+    dict[str, TechniqueModel],
+]:
+    """Load benchmarks and elite profiles from external versioned JSON file."""
+    path = Path(json_path) if json_path else _BENCHMARK_JSON_PATH
+    if not path.exists():
+        return (
+            _BUILTIN_BENCHMARKS,
+            _BUILTIN_ELITE_PROFILES,
+            _BUILTIN_RACE_SEGMENT_CONVENTIONS,
+            _BUILTIN_TECHNIQUE_MODELS,
+        )
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        benchmarks = [
+            BenchmarkEntry(
+                stroke=b["stroke"],
+                distance_m=b["distance_m"],
+                sex=b["sex"],
+                avg_velocity_mps=b["avg_velocity_mps"],
+                stroke_rate_cpm=tuple(b["stroke_rate_cpm"]) if b.get("stroke_rate_cpm") else None,
+                stroke_length_m=b.get("stroke_length_m"),
+                breakout_distance_m=b.get("breakout_distance_m"),
+                source=b["source"],
+                precision=b.get("precision", "verified"),
+                retrieved_date=b.get("retrieved_date"),
+            )
+            for b in raw.get("benchmarks", [])
+        ]
+
+        elite_profiles = {}
+        for k, p in raw.get("elite_profiles", {}).items():
+            race_data = {}
+            for ek, rm in p.get("race_data", {}).items():
+                race_data[ek] = RaceMetrics(
+                    event=rm["event"],
+                    time_s=rm["time_s"],
+                    splits=[(s[0], s[1]) for s in rm["splits"]],
+                    stroke_rate_cpm=tuple(rm["stroke_rate_cpm"]) if rm.get("stroke_rate_cpm") else None,
+                    stroke_length_m=rm.get("stroke_length_m"),
+                    avg_velocity_mps=rm["avg_velocity_mps"],
+                    breakout_distance_m=rm.get("breakout_distance_m"),
+                    source=rm["source"],
+                )
+            elite_profiles[k] = EliteSwimmerProfile(
+                name=p["name"],
+                country=p["country"],
+                country_flag=p["country_flag"],
+                primary_events=p["primary_events"],
+                achievement=p["achievement"],
+                technique_signature=p["technique_signature"],
+                race_data=race_data,
+                coaching_notes=p["coaching_notes"],
+                retrieved_date=p.get("retrieved_date"),
+            )
+
+        conventions = [
+            RaceSegmentConvention(
+                name=c["name"],
+                boundaries_m=tuple(c["boundaries_m"]),
+                source=c["source"],
+            )
+            for c in raw.get("race_segment_conventions", [])
+        ]
+
+        techniques = {
+            k: TechniqueModel(
+                stroke=t["stroke"],
+                key_elements=t["key_elements"],
+                common_errors=t["common_errors"],
+                drills=t["drills"],
+            )
+            for k, t in raw.get("technique_models", {}).items()
+        }
+
+        return benchmarks, elite_profiles, conventions, techniques
+
+    except Exception:
+        return (
+            _BUILTIN_BENCHMARKS,
+            _BUILTIN_ELITE_PROFILES,
+            _BUILTIN_RACE_SEGMENT_CONVENTIONS,
+            _BUILTIN_TECHNIQUE_MODELS,
+        )
+
+
+# Load data from external JSON
+BENCHMARKS, ELITE_PROFILES, RACE_SEGMENT_CONVENTIONS, TECHNIQUE_MODELS = (
+    load_benchmarks_from_json()
+)
 
 
 # ---------------------------------------------------------------------------

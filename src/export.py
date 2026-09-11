@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import csv
-from .pipeline import AnalysisResult
+from .core.models import AnalysisResult
 
 
 def export_csv(result: AnalysisResult, out_path: str) -> None:

@@ -108,3 +108,27 @@ CAP_COLOR_PRESETS = [
     "red", "orange", "yellow", "green", "neon green", "olive", "dark green", "cyan", "blue",
     "navy", "purple", "pink", "white", "black", "silver", "gray", "Custom hex…",
 ]
+
+# ---------------------------------------------------------------------------
+# Multi-swimmer detection (Module A — detector.py)
+#
+# SPLASH_CONFIDENCE_GATE: detections below this are treated as "splash frames";
+#   the EKF prediction takes over instead of a new measurement update.
+# SPLASH_RECOVERY_FRAMES: after this many consecutive splash frames the
+#   Gemini Vision recovery agent is invoked to re-seed the EKF.
+# MULTI_SWIMMER_YOLO_MODEL: YOLO weights filename; ultralytics downloads it
+#   automatically on first use if not present in the local cache.
+# ---------------------------------------------------------------------------
+SPLASH_CONFIDENCE_GATE: float = 0.4
+SPLASH_RECOVERY_FRAMES: int = 10
+MULTI_SWIMMER_YOLO_MODEL: str = "yolov8n.pt"
+
+# ---------------------------------------------------------------------------
+# Olympic Gold Standard template directory (Module D — comparator.py)
+#
+# Points to the data/olympic_gold/ folder that ships with the project and
+# contains pre-processed .npy joint-angle sequences for elite swimmers.
+# See data/olympic_gold/README.md for the file format and how to add new
+# templates from real footage using scripts/generate_templates.py.
+# ---------------------------------------------------------------------------
+OLYMPIC_DATA_DIR = resource_path("data", "olympic_gold")

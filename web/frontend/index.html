@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Swim Analyzer — AI-Powered Race & Biomechanics Video Analytics</title>
+  <meta name="description" content="Professional swim race video analytics with Gemini-assisted splash tracking, automated split timing, stroke rate/length metrics, and elite Olympic comparisons.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Navigation Header -->
+    <header class="top-nav">
+      <div class="logo-group">
+        <span class="logo-icon">🏊‍♂️</span>
+        <div class="logo-text">
+          <h1>SWIM ANALYZER</h1>
+          <span class="sub-badge">AI + EKF VISION ENGINE</span>
+        </div>
+      </div>
+      <div class="nav-actions">
+        <span id="ai-status-indicator" class="status-pill status-ready">
+          <span class="pulse-dot"></span> Gemini AI Ready
+        </span>
+        <button id="btn-header-new" class="btn btn-secondary btn-sm" style="display: none;">
+          + New Race
+        </button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <!-- STEP 1: Upload & Config Section -->
+      <section id="upload-section" class="view-section active">
+        <div class="hero-banner">
+          <h2>Precision Swim Race Video Analytics</h2>
+          <p>Upload your race video for automatic start detection, 5/10/15/25/50m splits, stroke rate & DPS mechanics, with Gemini Vision anti-splash recovery.</p>
+        </div>
+
+        <div class="workspace-grid">
+          <!-- Video Drop Zone -->
+          <div class="card drop-card">
+            <div id="drop-zone" class="drop-zone">
+              <input type="file" id="video-file-input" accept="video/mp4,video/mov,video/avi,video/mkv,video/webm" hidden>
+              <div class="drop-content">
+                <div class="upload-icon-ring">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                  </svg>
+                </div>
+                <h3>Drag & drop race video here</h3>
+                <p>Supports MP4, MOV, AVI, MKV, WebM up to 500MB</p>
+                <button type="button" id="btn-browse-file" class="btn btn-primary">
+                  Select Video File
+                </button>
+              </div>
+              <div id="file-info-preview" class="file-info-preview" style="display: none;">
+                <span class="file-icon">📹</span>
+                <div class="file-details">
+                  <strong id="file-name-label">filename.mp4</strong>
+                  <span id="file-size-label">0 MB</span>
+                </div>
+                <button type="button" id="btn-remove-file" class="btn-icon" title="Remove file">✕</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Analysis Configuration Form -->
+          <div class="card config-card">
+            <h3 class="card-title">Race Parameters</h3>
+            <form id="analysis-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="pool-length-select">Pool Length</label>
+                  <select id="pool-length-select" name="pool_length_m" class="form-control">
+                    <option value="50.0" selected>50m (Olympic Long Course)</option>
+                    <option value="25.0">25m (Short Course)</option>
+                    <option value="22.86">25 yards (SCY)</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <label for="event-distance-select">Event Distance</label>
+                  <select id="event-distance-select" name="event_distance_m" class="form-control">
+                    <option value="50">50m</option>
+                    <option value="100" selected>100m</option>
+                    <option value="200">200m</option>
+                    <option value="400">400m</option>
+                    <option value="800">800m</option>
+                    <option value="1500">1500m</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="stroke-select">Stroke</label>
+                  <select id="stroke-select" name="stroke_override" class="form-control">
+                    <option value="auto" selected>Auto-detect (AI + Kinematics)</option>
+                    <option value="freestyle">Freestyle</option>
+                    <option value="backstroke">Backstroke</option>
+                    <option value="breaststroke">Breaststroke</option>
+                    <option value="butterfly">Butterfly</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <label for="gender-select">Swimmer Category</label>
+                  <select id="gender-select" name="swimmer_sex" class="form-control">
+                    <option value="male" selected>Male</option>
+                    <option value="female">Female</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="target-id-input">Target Swimmer ID</label>
+                  <input type="number" id="target-id-input" name="target_id" class="form-control" placeholder="1 (auto-lock on swimmer 1)" value="1" min="1" max="20">
+                </div>
+
+                <div class="form-group">
+                  <label for="user-goal-input">Target / Goal</label>
+                  <input type="text" id="user-goal-input" name="user_goal" class="form-control" placeholder="e.g. Sub-55s 100m, high DPS" value="Improve race splits and technique efficiency">
+                </div>
+              </div>
+
+              <div class="toggles-group">
+                <label class="switch-control">
+                  <input type="checkbox" id="enable-ai-check" name="enable_ai" checked>
+                  <span class="slider"></span>
+                  <span class="switch-label">
+                    <strong>Enable Gemini Video AI</strong>
+                    <small>Splash recovery agent, technique audit & elite benchmark comparison</small>
+                  </span>
+                </label>
+              </div>
+
+              <button type="submit" id="btn-start-analysis" class="btn btn-primary btn-block btn-lg" disabled>
+                🚀 Run Race Analysis
+              </button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 2: Progress Section -->
+      <section id="progress-section" class="view-section">
+        <div class="card progress-card">
+          <div class="progress-header">
+            <div class="spinner-ring"></div>
+            <div>
+              <h2 id="progress-title">Analyzing Race Video…</h2>
+              <p id="progress-status-text">Initializing pipeline…</p>
+            </div>
+            <div class="progress-pct-badge" id="progress-pct-label">0%</div>
+          </div>
+
+          <div class="progress-bar-track">
+            <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%;"></div>
+          </div>
+
+          <div class="stages-stepper">
+            <div class="step-node active" id="step-node-1">
+              <div class="node-circle">1</div>
+              <span>Audio Start</span>
+            </div>
+            <div class="step-node" id="step-node-2">
+              <div class="node-circle">2</div>
+              <span>EKF Tracking</span>
+            </div>
+            <div class="step-node" id="step-node-3">
+              <div class="node-circle">3</div>
+              <span>Gemini Vision</span>
+            </div>
+            <div class="step-node" id="step-node-4">
+              <div class="node-circle">4</div>
+              <span>Splits & Biomechanics</span>
+            </div>
+            <div class="step-node" id="step-node-5">
+              <div class="node-circle">5</div>
+              <span>Report Ready</span>
+            </div>
+          </div>
+
+          <div class="cancel-row">
+            <button type="button" id="btn-cancel-job" class="btn btn-danger btn-sm">Cancel Analysis</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 3: Results Dashboard Section -->
+      <section id="results-section" class="view-section">
+        <div class="dashboard-header-bar">
+          <div>
+            <span class="badge badge-success" id="result-stroke-badge">100m Freestyle</span>
+            <h2 id="result-title">Race Analysis Results</h2>
+          </div>
+          <div class="action-buttons">
+            <button type="button" id="btn-download-csv" class="btn btn-secondary">
+              📥 Export CSV Report
+            </button>
+            <button type="button" id="btn-restart-analysis" class="btn btn-primary">
+              ← Analyze Another Video
+            </button>
+          </div>
+        </div>
+
+        <!-- Metric KPI Cards -->
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Total Time</div>
+            <div class="kpi-value" id="kpi-total-time">--:--</div>
+            <div class="kpi-sub" id="kpi-start-method">Start: Audio gun</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Avg Velocity</div>
+            <div class="kpi-value" id="kpi-avg-velocity">-- m/s</div>
+            <div class="kpi-sub" id="kpi-velocity-status">Clean swim window</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Reaction / 15m</div>
+            <div class="kpi-value" id="kpi-start-15m">-- s</div>
+            <div class="kpi-sub" id="kpi-start-reaction">Reaction: -- s</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Turn Duration</div>
+            <div class="kpi-value" id="kpi-turn-time">-- s</div>
+            <div class="kpi-sub">5m in to 10m out</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Tracking Quality</div>
+            <div class="kpi-value" id="kpi-gemini-frames">0 AI / 0 CV</div>
+            <div class="kpi-sub" id="kpi-uncertain-frames">0 uncertain frames</div>
+          </div>
+        </div>
+
+        <!-- Tabbed Results Views -->
+        <div class="tabs-container">
+          <nav class="tabs-nav">
+            <button class="tab-btn active" data-tab="tab-splits">⏱ Splits & Micro-splits</button>
+            <button class="tab-btn" data-tab="tab-charts">📊 Velocity & Stroke Curves</button>
+            <button class="tab-btn" data-tab="tab-quality">🔍 Tracking Telemetry & Gating</button>
+            <button class="tab-btn" data-tab="tab-ai" id="tab-ai-btn">🤖 AI Technique & Benchmarks</button>
+          </nav>
+
+          <!-- Tab 1: Splits -->
+          <div id="tab-splits" class="tab-pane active">
+            <div class="card table-card">
+              <div class="card-header">
+                <h3>Official & Micro Split Times</h3>
+                <span class="card-subtitle">5m, 10m, 15m breakout, 25m, 35m, 50m, and final finish touch</span>
+              </div>
+              <div class="table-responsive">
+                <table class="data-table" id="splits-table">
+                  <thead>
+                    <tr>
+                      <th>Distance Marker</th>
+                      <th>Cumulative Time (s)</th>
+                      <th>Segment Split (s)</th>
+                      <th>Calculation Method</th>
+                    </tr>
+                  </thead>
+                  <tbody id="splits-table-body">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: Charts -->
+          <div id="tab-charts" class="tab-pane">
+            <div class="charts-grid">
+              <div class="card chart-card">
+                <h3>Velocity Profile Across Pool (m/s)</h3>
+                <div class="chart-wrapper">
+                  <canvas id="velocity-chart"></canvas>
+                </div>
+              </div>
+              <div class="card chart-card">
+                <h3>Stroke Rate (cpm) & Stroke Length (m) Over Time</h3>
+                <div class="chart-wrapper">
+                  <canvas id="stroke-chart"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 3: Tracking Quality & Segments -->
+          <div id="tab-quality" class="tab-pane">
+            <div class="card quality-card">
+              <h3>Tracking Engine Health & Gating Telemetry</h3>
+              <p class="section-desc">The Kalman Filter applies Mahalanobis gating (chi² 2-DOF) to reject splash artifacts. Prolonged occlusion triggers Gemini Multimodal Vision recovery clips.</p>
+
+              <div class="telemetry-bar-grid">
+                <div class="telemetry-item">
+                  <span class="t-label">CV Optical Flow & Filter:</span>
+                  <span class="t-val" id="t-cv-val">100%</span>
+                </div>
+                <div class="telemetry-item">
+                  <span class="t-label">Gemini AI Recovery:</span>
+                  <span class="t-val highlight-amber" id="t-gemini-val">0%</span>
+                </div>
+                <div class="telemetry-item">
+                  <span class="t-label">Auto-Corrected Outliers:</span>
+                  <span class="t-val" id="t-corrected-val">0</span>
+                </div>
+              </div>
+
+              <h4>Identified Low-Confidence / Occlusion Segments</h4>
+              <div class="table-responsive">
+                <table class="data-table" id="segments-table">
+                  <thead>
+                    <tr>
+                      <th>Start Frame</th>
+                      <th>End Frame</th>
+                      <th>Time Span</th>
+                      <th>Trigger Reason</th>
+                      <th>Resolution Source</th>
+                    </tr>
+                  </thead>
+                  <tbody id="segments-table-body">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 4: AI Technique & Elite Comparison -->
+          <div id="tab-ai" class="tab-pane">
+            <div class="ai-results-grid">
+              <!-- Technique Audit -->
+              <div class="card">
+                <h3>🤖 Technique Audit Breakdown</h3>
+                <div id="ai-technique-content">
+                  <p class="empty-notice">No AI technique analysis returned for this run.</p>
+                </div>
+              </div>
+
+              <!-- Elite Benchmark Comparison -->
+              <div class="card">
+                <h3>🏅 Elite Olympic Comparison</h3>
+                <div id="ai-benchmark-content">
+                  <p class="empty-notice">No benchmark comparison available.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>Swim Analyzer — Built with OpenCV, EKF Kinematics, MediaPipe & Google Gemini Multimodal Video AI.</p>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

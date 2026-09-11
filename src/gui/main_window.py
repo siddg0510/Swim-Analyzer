@@ -1,21 +1,20 @@
-"""Main window — UI, initial calibration, and AI configuration."""
+"""Main window — streamlined UI, swimmer tracking target selection, and AI configuration."""
 from __future__ import annotations
 
-import cv2
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit, QFileDialog, QMessageBox,
-    QProgressBar, QGroupBox, QFormLayout, QStackedWidget, QCheckBox, QDialog,
-    QDialogButtonBox, QTextEdit,
+    QComboBox, QLineEdit, QFileDialog, QMessageBox, QProgressBar, QGroupBox,
+    QFormLayout, QStackedWidget, QCheckBox, QDialog, QDialogButtonBox,
+    QScrollArea, QFrame,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 
-from ..vision.calibration import PoolCalibrator
-from ..config import resource_path, EVENTS, POOL_TYPES, GENDERS, STROKES, CAP_COLOR_PRESETS
+from ..config import resource_path, EVENTS, POOL_TYPES, GENDERS, STROKES
 from ..pipeline import AnalysisConfig, AnalysisWorker, AnalysisResult
-from .calibration_widget import CalibrationDialog, ClickableImageLabel, _cv_frame_to_qpixmap
+from .calibration_widget import CalibrationDialog
 from .dashboard import DashboardWidget
+from .swimmer_selection import SwimmerSelectionDialog
 
 
 class AISettingsDialog(QDialog):
@@ -24,19 +23,22 @@ class AISettingsDialog(QDialog):
     def __init__(self, parent=None, current_key: str = "", current_model: str = ""):
         super().__init__(parent)
         self.setWindowTitle("AI Settings")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(460)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
 
-        layout.addWidget(QLabel(
-            "<b>Enter your Google Gemini API key</b><br>"
-            "Get a free key at <a href='https://aistudio.google.com/apikey'>"
-            "aistudio.google.com/apikey</a><br><br>"
-            "The key is stored locally on your machine only."
-        ))
+        info_label = QLabel(
+            "<b>Google Gemini API Key</b><br>"
+            "Get a key at <a href='https://aistudio.google.com/apikey' style='color:#00a8ff;'>"
+            "aistudio.google.com/apikey</a><br>"
+            "<span style='color:#7f8fa6; font-size:9pt;'>Your key is stored locally on this machine only.</span>"
+        )
+        info_label.setOpenExternalLinks(True)
+        layout.addWidget(info_label)
 
         self.key_edit = QLineEdit()
-        self.key_edit.setPlaceholderText("AIza...")
+        self.key_edit.setPlaceholderText("Enter AIza... key")
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         if current_key:
             self.key_edit.setText(current_key)
@@ -50,10 +52,9 @@ class AISettingsDialog(QDialog):
         )
         layout.addWidget(self.show_check)
 
-        layout.addWidget(QLabel("<b>Select AI Model</b><br>gemini-3.6-flash is recommended for video analysis."))
+        layout.addWidget(QLabel("<b>AI Model</b>"))
         self.model_combo = QComboBox()
         self.model_combo.addItems([
-            "gemini-3.6-flash",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
             "gemini-2.0-flash",
@@ -83,17 +84,21 @@ class MainWindow(QMainWindow):
         icon_path = resource_path("assets", "icon.png")
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(800, 700)
+        self.setMinimumSize(700, 600)
+        self.resize(820, 720)
 
         self.video_path: str | None = None
         self.reference_video_path: str | None = None
-        self.reference_points = []
-        self.lane_polygon = []
+        self.calibration_keyframes: list = []
         self.worker: AnalysisWorker | None = None
         self._gemini_key: str | None = None
         self._gemini_model: str | None = None
 
-        # Try to load saved API key and model
+        # Swimmer tracking target state
+        self._target_id: int | None = None
+        self._target_lane: int | None = None
+
+        # Load saved API key and model if available
         try:
             from ..ai.gemini_config import resolve_api_key, resolve_model
             self._gemini_key = resolve_api_key()
@@ -110,52 +115,60 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _build_setup_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(16, 16, 16, 16)
+        page_layout.setSpacing(12)
 
-        # -- Video upload --
+        # Scrollable area so configuration never overflows or clips
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 8, 4)
+        content_layout.setSpacing(14)
+
+        # -- 1. Video file --
         upload_box = QGroupBox("1. Video")
         upload_layout = QHBoxLayout(upload_box)
+        upload_layout.setContentsMargins(14, 16, 14, 14)
         self.video_label = QLabel("No video selected.")
         self.video_label.setWordWrap(True)
+        self.video_label.setStyleSheet("color: #7f8fa6;")
         browse_btn = QPushButton("Browse…")
+        browse_btn.setFixedWidth(110)
         browse_btn.clicked.connect(self._browse_video)
         upload_layout.addWidget(self.video_label, stretch=1)
         upload_layout.addWidget(browse_btn)
-        layout.addWidget(upload_box)
+        content_layout.addWidget(upload_box)
 
-        # -- Required inputs --
-        inputs_box = QGroupBox("2. Race setup")
+        # -- 2. Swimmer Selection (Primary Tracking Target) --
+        swimmer_box = QGroupBox("2. Target Swimmer")
+        swimmer_layout = QHBoxLayout(swimmer_box)
+        swimmer_layout.setContentsMargins(14, 16, 14, 14)
+        self.swimmer_status_label = QLabel("Select a video first to identify swimmers.")
+        self.swimmer_status_label.setStyleSheet("color: #7f8fa6;")
+        self.select_swimmer_btn = QPushButton("🎯 Select Swimmer ID…")
+        self.select_swimmer_btn.setFixedWidth(180)
+        self.select_swimmer_btn.setEnabled(False)
+        self.select_swimmer_btn.clicked.connect(self._open_swimmer_selection)
+        swimmer_layout.addWidget(self.swimmer_status_label, stretch=1)
+        swimmer_layout.addWidget(self.select_swimmer_btn)
+        content_layout.addWidget(swimmer_box)
+
+        # -- 3. Race setup (Pool, distance, stroke, gender) --
+        inputs_box = QGroupBox("3. Race Setup")
         form = QFormLayout(inputs_box)
+        form.setContentsMargins(14, 16, 14, 14)
+        form.setSpacing(10)
 
         self.pool_length_combo = QComboBox()
         self.pool_length_combo.addItems(POOL_TYPES)
         self.pool_length_combo.setCurrentText("short course (25m)")
         form.addRow("Pool length:", self.pool_length_combo)
 
-        self.lane_spin = QSpinBox()
-        self.lane_spin.setRange(1, 10)
-        self.lane_spin.setValue(4)
-        form.addRow("Lane number:", self.lane_spin)
-
-        cap_row = QHBoxLayout()
-        self.cap_combo = QComboBox()
-        self.cap_combo.addItems(CAP_COLOR_PRESETS)
-        self.cap_hex_edit = QLineEdit()
-        self.cap_hex_edit.setPlaceholderText("#RRGGBB")
-        self.cap_hex_edit.setEnabled(False)
-        self.cap_combo.currentTextChanged.connect(
-            lambda t: self.cap_hex_edit.setEnabled(t == "Custom hex…")
-        )
-        
-        cap_row.addWidget(self.cap_combo)
-        cap_row.addWidget(self.cap_hex_edit)
-        form.addRow("Swim cap colour:", cap_row)
-        
-        note_label = QLabel("<i>(Can also be set per-keyframe in Calibration)</i>")
-        note_label.setStyleSheet("color: gray;")
-        form.addRow("", note_label)
-
-        # Event details for AI analysis
         self.event_combo = QComboBox()
         self.event_combo.addItems(EVENTS)
         self.event_combo.setCurrentText("100m")
@@ -169,43 +182,49 @@ class MainWindow(QMainWindow):
         self.gender_combo.addItems(GENDERS)
         form.addRow("Gender:", self.gender_combo)
 
+        content_layout.addWidget(inputs_box)
 
-
-        layout.addWidget(inputs_box)
-
-        # -- Calibration --
-        calib_box = QGroupBox("3. Calibration")
-        calib_layout = QVBoxLayout(calib_box)
+        # -- 4. Pool Calibration --
+        calib_box = QGroupBox("4. Pool Calibration")
+        calib_layout = QHBoxLayout(calib_box)
+        calib_layout.setContentsMargins(14, 16, 14, 14)
         self.calib_status = QLabel("Not calibrated yet.")
-        calib_btn = QPushButton("Open calibration overlay…")
+        self.calib_status.setStyleSheet("color: #7f8fa6;")
+        calib_btn = QPushButton("Open Calibration…")
+        calib_btn.setFixedWidth(160)
         calib_btn.clicked.connect(self._open_calibration)
-        calib_layout.addWidget(self.calib_status)
+        calib_layout.addWidget(self.calib_status, stretch=1)
         calib_layout.addWidget(calib_btn)
-        layout.addWidget(calib_box)
+        content_layout.addWidget(calib_box)
 
-        # -- AI Analysis Settings --
-        ai_box = QGroupBox("4. 🤖 AI Analysis (Gemini)")
+        # -- 5. AI Coaching & Video Recovery (Gemini) --
+        ai_box = QGroupBox("5. AI Coaching & Tracking Recovery (Gemini)")
         ai_layout = QVBoxLayout(ai_box)
+        ai_layout.setContentsMargins(14, 16, 14, 14)
+        ai_layout.setSpacing(10)
 
-        self.ai_enabled_check = QCheckBox("Enable AI-powered technique analysis")
+        ai_top_row = QHBoxLayout()
+        self.ai_enabled_check = QCheckBox("Enable AI technique analysis & splash recovery")
         self.ai_enabled_check.setChecked(bool(self._gemini_key))
         self.ai_enabled_check.toggled.connect(self._on_ai_toggle)
-        ai_layout.addWidget(self.ai_enabled_check)
+        ai_top_row.addWidget(self.ai_enabled_check, stretch=1)
 
-        key_row = QHBoxLayout()
         self.api_key_status = QLabel(
-            "✅ API key configured" if self._gemini_key else "❌ No API key"
+            "✅ Ready" if self._gemini_key else "❌ No API key"
         )
-        api_key_btn = QPushButton("AI Settings…")
-        api_key_btn.clicked.connect(self._configure_api_key)
-        key_row.addWidget(self.api_key_status)
-        key_row.addStretch(1)
-        key_row.addWidget(api_key_btn)
-        ai_layout.addLayout(key_row)
+        self.api_key_status.setStyleSheet(
+            "color: #27ae60; font-weight: bold;" if self._gemini_key else "color: #e74c3c;"
+        )
+        ai_settings_btn = QPushButton("AI Settings…")
+        ai_settings_btn.setFixedWidth(120)
+        ai_settings_btn.clicked.connect(self._configure_api_key)
+        ai_top_row.addWidget(self.api_key_status)
+        ai_top_row.addWidget(ai_settings_btn)
+        ai_layout.addLayout(ai_top_row)
 
         # Elite comparison
         compare_row = QHBoxLayout()
-        compare_row.addWidget(QLabel("Compare with:"))
+        compare_row.addWidget(QLabel("Compare with elite benchmark:"))
         self.elite_combo = QComboBox()
         self.elite_combo.addItem("Auto-select best match", "auto")
         try:
@@ -217,45 +236,62 @@ class MainWindow(QMainWindow):
         compare_row.addWidget(self.elite_combo, stretch=1)
         ai_layout.addLayout(compare_row)
 
-        # Reference video
-        ref_row = QHBoxLayout()
-        self.ref_video_label = QLabel("No reference video (optional)")
-        self.ref_video_label.setWordWrap(True)
-        ref_btn = QPushButton("Add reference video…")
-        ref_btn.clicked.connect(self._browse_reference_video)
-        ref_clear_btn = QPushButton("Clear")
-        ref_clear_btn.clicked.connect(self._clear_reference_video)
-        ref_row.addWidget(self.ref_video_label, stretch=1)
-        ref_row.addWidget(ref_btn)
-        ref_row.addWidget(ref_clear_btn)
-        ai_layout.addLayout(ref_row)
+        content_layout.addWidget(ai_box)
+        content_layout.addStretch(1)
 
-        # Goal
-        goal_row = QHBoxLayout()
-        goal_row.addWidget(QLabel("Your goal:"))
-        self.goal_edit = QLineEdit()
-        self.goal_edit.setPlaceholderText("e.g. Break 55 seconds in 100m freestyle")
-        goal_row.addWidget(self.goal_edit, stretch=1)
-        ai_layout.addLayout(goal_row)
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll, stretch=1)
 
-        layout.addWidget(ai_box)
-
-        # -- Run --
-        run_row = QHBoxLayout()
-        self.run_btn = QPushButton("🏊 Run Analysis")
-        self.run_btn.setMinimumHeight(40)
-        self.run_btn.clicked.connect(self._run_analysis)
-        run_row.addStretch(1)
-        run_row.addWidget(self.run_btn)
-        layout.addLayout(run_row)
+        # -- Sticky bottom action footer --
+        footer = QFrame()
+        footer.setStyleSheet("""
+            QFrame {
+                background-color: #242933;
+                border: 1px solid #353b48;
+                border-radius: 6px;
+            }
+        """)
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(12, 10, 12, 10)
+        footer_layout.setSpacing(6)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
-        layout.addWidget(self.progress)
-        self.progress_label = QLabel("")
-        layout.addWidget(self.progress_label)
+        self.progress.setFixedHeight(10)
+        self.progress.setTextVisible(False)
+        footer_layout.addWidget(self.progress)
 
-        layout.addStretch(1)
+        action_row = QHBoxLayout()
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet("color: #7f8fa6; font-size: 10pt;")
+        action_row.addWidget(self.progress_label, stretch=1)
+
+        self.run_btn = QPushButton("🏊 Run Analysis")
+        self.run_btn.setMinimumHeight(42)
+        self.run_btn.setMinimumWidth(160)
+        self.run_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00a8ff;
+                color: white;
+                font-size: 11pt;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 8px 24px;
+            }
+            QPushButton:hover {
+                background-color: #0097e6;
+            }
+            QPushButton:disabled {
+                background-color: #353b48;
+                color: #7f8fa6;
+            }
+        """)
+        self.run_btn.clicked.connect(self._run_analysis)
+        action_row.addWidget(self.run_btn)
+
+        footer_layout.addLayout(action_row)
+        page_layout.addWidget(footer)
+
         return page
 
     # ------------------------------------------------------------------
@@ -266,21 +302,38 @@ class MainWindow(QMainWindow):
         if path:
             self.video_path = path
             self.video_label.setText(path)
+            self.video_label.setStyleSheet("color: #f5f6fa; font-weight: 500;")
             self.calibration_keyframes = []
+            self._target_id = None
+            self._target_lane = None
+            self.select_swimmer_btn.setEnabled(True)
+            self.swimmer_status_label.setText("⚠️ Click 'Select Swimmer ID' to identify and choose target.")
+            self.swimmer_status_label.setStyleSheet("color: #f39c12; font-weight: 500;")
             self._update_calibration_status()
 
-    def _browse_reference_video(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select reference video (e.g. Olympic footage)", "",
-            "Video files (*.mp4 *.mov *.avi *.mkv)"
-        )
-        if path:
-            self.reference_video_path = path
-            self.ref_video_label.setText(f"📹 {path.split('/')[-1].split(chr(92))[-1]}")
+            # Immediately prompt swimmer selection
+            self._open_swimmer_selection()
 
-    def _clear_reference_video(self) -> None:
-        self.reference_video_path = None
-        self.ref_video_label.setText("No reference video (optional)")
+    def _open_swimmer_selection(self) -> None:
+        if not self.video_path:
+            QMessageBox.warning(self, "No video", "Select a video first.")
+            return
+
+        dialog = SwimmerSelectionDialog(self.video_path, parent=self)
+        if dialog.exec():
+            self._target_id = dialog.selected_id
+            self._target_lane = dialog.selected_lane
+            if self._target_id is not None:
+                self.swimmer_status_label.setText(f"🎯 Target Locked: Swimmer ID {self._target_id}")
+                self.swimmer_status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+                self.select_swimmer_btn.setText(f"🎯 Change Swimmer (ID {self._target_id})…")
+            elif self._target_lane is not None:
+                self.swimmer_status_label.setText(f"🎯 Target Locked: Lane {self._target_lane}")
+                self.swimmer_status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+                self.select_swimmer_btn.setText(f"🎯 Change Lane ({self._target_lane})…")
+            else:
+                self.swimmer_status_label.setText("⚠️ Swimmer will be auto-selected at race start.")
+                self.swimmer_status_label.setStyleSheet("color: #f39c12;")
 
     def _open_calibration(self) -> None:
         if not self.video_path:
@@ -288,24 +341,9 @@ class MainWindow(QMainWindow):
             return
 
         dialog = CalibrationDialog(self.video_path, parent=self)
-        # Pass the main page cap color to the dialog
-        dialog.set_default_cap_color(self._get_cap_color())
-        
         if dialog.exec():
             self.calibration_keyframes = dialog.get_calibration_keyframes()
             self._update_calibration_status()
-            
-            # If any keyframe has a cap color, update the main page to match
-            for kf in self.calibration_keyframes:
-                if kf.cap_color:
-                    if kf.cap_color.startswith("#"):
-                        self.cap_combo.setCurrentText("Custom hex…")
-                        self.cap_hex_edit.setText(kf.cap_color)
-                    else:
-                        idx = self.cap_combo.findText(kf.cap_color)
-                        if idx >= 0:
-                            self.cap_combo.setCurrentIndex(idx)
-                    break
 
     def _configure_api_key(self) -> None:
         dialog = AISettingsDialog(self, current_key=self._gemini_key or "", current_model=self._gemini_model or "")
@@ -321,12 +359,14 @@ class MainWindow(QMainWindow):
                     save_model(model)
                 except Exception:
                     pass
-                self.api_key_status.setText(f"✅ AI Ready ({model})")
+                self.api_key_status.setText("✅ Ready")
+                self.api_key_status.setStyleSheet("color: #27ae60; font-weight: bold;")
                 self.ai_enabled_check.setChecked(True)
                 self._update_calibration_status()
             else:
                 self._gemini_key = None
                 self.api_key_status.setText("❌ No API key")
+                self.api_key_status.setStyleSheet("color: #e74c3c;")
                 self.ai_enabled_check.setChecked(False)
                 self._update_calibration_status()
 
@@ -338,18 +378,15 @@ class MainWindow(QMainWindow):
         self._update_calibration_status()
 
     def _update_calibration_status(self) -> None:
-        if hasattr(self, 'calibration_keyframes') and self.calibration_keyframes:
-            self.calib_status.setText(f"Calibrated: {len(self.calibration_keyframes)} keyframes saved.")
+        if self.calibration_keyframes:
+            self.calib_status.setText(f"Calibrated ({len(self.calibration_keyframes)} keyframes saved)")
+            self.calib_status.setStyleSheet("color: #27ae60; font-weight: bold;")
         elif self.ai_enabled_check.isChecked() and self._gemini_key:
             self.calib_status.setText("🤖 AI Auto-Calibration will run at analysis time")
+            self.calib_status.setStyleSheet("color: #00a8ff;")
         else:
             self.calib_status.setText("Not calibrated yet.")
-
-    def _get_cap_color(self) -> str:
-        choice = self.cap_combo.currentText()
-        if choice == "Custom hex…":
-            return self.cap_hex_edit.text().strip() or "#FFFF00"
-        return choice
+            self.calib_status.setStyleSheet("color: #7f8fa6;")
 
     def _get_event_distance(self) -> int:
         text = self.event_combo.currentText()
@@ -362,14 +399,12 @@ class MainWindow(QMainWindow):
     def _get_elite_key(self) -> str | None:
         key = self.elite_combo.currentData()
         if key == "auto":
-            # Auto-select based on event
             try:
                 from ..analysis.benchmarks import get_profiles_for_event
                 stroke = self._get_stroke_override() or "freestyle"
                 distance = self._get_event_distance()
                 profiles = get_profiles_for_event(stroke, distance)
                 if profiles:
-                    # Find the key for this profile
                     from ..analysis.benchmarks import ELITE_PROFILES
                     for k, p in ELITE_PROFILES.items():
                         if p.name == profiles[0].name:
@@ -383,19 +418,26 @@ class MainWindow(QMainWindow):
         if not self.video_path:
             QMessageBox.warning(self, "No video", "Select a video first.")
             return
+
+        # Ensure a swimmer ID is chosen
+        if self._target_id is None and self._target_lane is None:
+            self._open_swimmer_selection()
+            if self._target_id is None and self._target_lane is None:
+                QMessageBox.warning(self, "Swimmer Required", "Please select a swimmer to track before running analysis.")
+                return
+
         ai_enabled = self.ai_enabled_check.isChecked() and bool(self._gemini_key)
 
-        if not hasattr(self, 'calibration_keyframes') or not self.calibration_keyframes:
+        if not self.calibration_keyframes:
             if not ai_enabled:
                 QMessageBox.warning(self, "Not calibrated", "Complete calibration first (or enable AI Auto-Calibration).")
                 return
             else:
                 self.calibration_keyframes = []
         else:
-            # Check if any keyframe has a valid lane polygon
             has_valid_polygon = any(len(kf.lane_polygon_px) >= 3 for kf in self.calibration_keyframes)
             if not has_valid_polygon and not ai_enabled:
-                QMessageBox.warning(self, "Warning", "Lane boundaries not drawn — tracking may pick up swimmers from adjacent lanes.")
+                QMessageBox.warning(self, "Warning", "Lane boundaries not drawn — tracking may pick up adjacent swimmers.")
 
         pool_type_text = self.pool_length_combo.currentText()
         if "50m" in pool_type_text:
@@ -403,7 +445,7 @@ class MainWindow(QMainWindow):
         elif "25m" in pool_type_text:
             pool_length_m = 25.0
         elif "25y" in pool_type_text:
-            pool_length_m = 22.86  # 25 yards in meters
+            pool_length_m = 22.86
         else:
             pool_length_m = 25.0
 
@@ -411,7 +453,7 @@ class MainWindow(QMainWindow):
             video_path=self.video_path,
             pool_length_m=pool_length_m,
             calibration_keyframes=self.calibration_keyframes,
-            cap_color=self._get_cap_color(),
+            cap_color=None,
             wall_position_m=pool_length_m,
             # AI options
             enable_ai=ai_enabled,
@@ -422,8 +464,11 @@ class MainWindow(QMainWindow):
             pool_type=pool_type_text.split(" (")[0],
             swimmer_sex=self.gender_combo.currentText(),
             elite_compare_key=self._get_elite_key() if ai_enabled else None,
-            reference_video_path=self.reference_video_path if ai_enabled else None,
-            user_goal=self.goal_edit.text().strip() or "Improve race time and technique efficiency",
+            reference_video_path=None,
+            user_goal="Improve race time and technique efficiency",
+            # Primary swimmer tracking
+            enable_multi_swimmer=True,
+            target_id=self._target_id,
         )
 
         self.run_btn.setEnabled(False)

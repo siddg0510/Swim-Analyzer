@@ -89,16 +89,15 @@ class CalibrationDialog(QDialog):
         panel.setContentsMargins(0, 0, 0, 0)
         
         step1_label = QLabel(
-            "<b>Step 1 — Swimmer Selection:</b> Pick the cap color (click on cap or select preset), "
-            "then draw the lane boundary (4 corners, clockwise). Use 'Preview' to verify tracking.<br>"
-            "<b>Step 2 — Reference Points:</b> Click landmarks with known distances.<br>"
-            "<b>Step 3 — Save Keyframe:</b> Save and repeat if needed."
+            "<b>Step 1 — Lane Boundary:</b> Click 4 corners (clockwise) to define the swimmer's lane.<br>"
+            "<b>Step 2 — Reference Points:</b> Click landmarks with known pool distances (e.g. 0m, 5m, 15m, 25m, 50m).<br>"
+            "<b>Step 3 — Save Keyframe:</b> Save keyframe and click Done."
         )
         step1_label.setWordWrap(True)
         panel.addWidget(step1_label)
 
         mode_row = QHBoxLayout()
-        self.rb_swimmer = QRadioButton("🏊 Swimmer")
+        self.rb_swimmer = QRadioButton("🏊 Lane boundary (4 corners)")
         self.rb_swimmer.setChecked(True)
         self.rb_reference = QRadioButton("📏 Reference points")
         self.mode_group = QButtonGroup(self)
@@ -109,42 +108,15 @@ class CalibrationDialog(QDialog):
         mode_row.addWidget(self.rb_swimmer)
         mode_row.addWidget(self.rb_reference)
         panel.addLayout(mode_row)
-        
-        swim_box = QGroupBox("Swimmer details")
-        swim_layout = QVBoxLayout(swim_box)
-        
-        self.cap_combo = QComboBox()
-        self.cap_combo.addItems(CAP_COLOR_PRESETS)
-        self.cap_hex_edit = QLineEdit()
-        self.cap_hex_edit.setPlaceholderText("#RRGGBB")
-        self.cap_hex_edit.setEnabled(False)
-        self.cap_combo.currentTextChanged.connect(
-            lambda t: self.cap_hex_edit.setEnabled(t == "Custom hex…")
-        )
-        cap_row = QHBoxLayout()
-        cap_row.addWidget(self.cap_combo)
-        cap_row.addWidget(self.cap_hex_edit)
-        swim_layout.addWidget(QLabel("Cap Color:"))
-        swim_layout.addLayout(cap_row)
 
-        self.btn_pick_color = QPushButton("🎨 Pick from image")
-        self.btn_pick_color.setCheckable(True)
-        self.btn_pick_color.toggled.connect(self._on_pick_color_toggled)
-        swim_layout.addWidget(self.btn_pick_color)
-
+        lane_box = QGroupBox("Lane setting")
+        lane_layout = QHBoxLayout(lane_box)
+        lane_layout.addWidget(QLabel("Lane number:"))
         self.lane_spin = QSpinBox()
         self.lane_spin.setRange(1, 10)
         self.lane_spin.setValue(4)
-        lane_row = QHBoxLayout()
-        lane_row.addWidget(QLabel("Lane number:"))
-        lane_row.addWidget(self.lane_spin)
-        swim_layout.addLayout(lane_row)
-        
-        self.preview_check = QCheckBox("Preview Tracking")
-        self.preview_check.toggled.connect(self._on_preview_toggled)
-        swim_layout.addWidget(self.preview_check)
-        
-        panel.addWidget(swim_box)
+        lane_layout.addWidget(self.lane_spin)
+        panel.addWidget(lane_box)
 
         self.distance_spin = QDoubleSpinBox()
         self.distance_spin.setRange(0, 200)
@@ -225,25 +197,16 @@ class CalibrationDialog(QDialog):
         self._load_frame(value)
         
     def set_default_cap_color(self, color: str) -> None:
-        if color.startswith("#"):
-            self.cap_combo.setCurrentText("Custom hex…")
-            self.cap_hex_edit.setText(color)
-        else:
-            idx = self.cap_combo.findText(color)
-            if idx >= 0:
-                self.cap_combo.setCurrentIndex(idx)
+        pass
 
     def _get_cap_color(self) -> str:
-        choice = self.cap_combo.currentText()
-        if choice == "Custom hex…":
-            return self.cap_hex_edit.text().strip() or "#FFFF00"
-        return choice
+        return ""
 
     def _save_keyframe(self) -> None:
         if len(self.reference_points) < 2:
             QMessageBox.warning(self, "Not enough points", "Add at least 2 reference points for a keyframe.")
             return
-            
+
         if len(self.lane_polygon) < 3:
             reply = QMessageBox.question(
                 self, "No Lane Boundary",
@@ -253,29 +216,15 @@ class CalibrationDialog(QDialog):
             if reply == QMessageBox.StandardButton.No:
                 return
 
-        color = self._get_cap_color()
         lane_num = self.lane_spin.value()
-            
+
         kf = CalibrationKeyframe(
             frame_idx=self.current_frame_idx,
             reference_points=list(self.reference_points),
             lane_polygon_px=list(self.lane_polygon),
-            cap_color=color,
+            cap_color="",
             lane_number=lane_num
         )
-        
-        # If preview is on, validate tracking
-        if self.preview_check.isChecked() and len(self.lane_polygon) >= 3:
-            tracker = CapTracker(color, self.lane_polygon)
-            pos = tracker.detect(self.frame)
-            if not pos:
-                reply = QMessageBox.question(
-                    self, "No Swimmer Detected", 
-                    "No swimmer detected with this cap color in this lane. Save anyway?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                if reply == QMessageBox.StandardButton.No:
-                    return
 
         # If there's already a keyframe for this exact frame, replace it
         replaced = False
@@ -284,18 +233,18 @@ class CalibrationDialog(QDialog):
                 self.keyframes[i] = kf
                 replaced = True
                 break
-                
+
         if not replaced:
             self.keyframes.append(kf)
-            
+
         self.keyframes.sort(key=lambda k: k.frame_idx)
-        
+
         self.kf_list.clear()
         for k in self.keyframes:
             self.kf_list.addItem(f"Frame {k.frame_idx}: {len(k.reference_points)} pts, {len(k.lane_polygon_px)} lane pts")
-            
+
         self._clear_all()
-        
+
     def _remove_keyframe(self) -> None:
         row = self.kf_list.currentRow()
         if row >= 0:
@@ -304,15 +253,6 @@ class CalibrationDialog(QDialog):
 
     def _mode_changed(self, checked: bool) -> None:
         self.mode = "swimmer" if self.rb_swimmer.isChecked() else "reference"
-        self._redraw()
-
-    def _on_preview_toggled(self, checked: bool) -> None:
-        if checked and len(self.lane_polygon) < 3:
-            QMessageBox.information(self, "Preview", "Please draw at least 3 lane boundary corners (Step 1) before previewing tracking.")
-            self.preview_check.blockSignals(True)
-            self.preview_check.setChecked(False)
-            self.preview_check.blockSignals(False)
-            return
         self._redraw()
 
     def _to_original_coords(self, x_display: float, y_display: float) -> tuple[float, float]:
@@ -333,18 +273,7 @@ class CalibrationDialog(QDialog):
                 QListWidgetItem(f"Ref: ({x_orig:.0f}, {y_orig:.0f}) -> {dist:.2f} m")
             )
         else:
-            if self._picking_color:
-                h, w = self.frame.shape[:2]
-                xi, yi = int(x_orig), int(y_orig)
-                if 0 <= xi < w and 0 <= yi < h:
-                    b, g, r = self.frame[yi, xi]
-                    hex_color = f"#{int(r):02X}{int(g):02X}{int(b):02X}"
-                    self.cap_combo.setCurrentText("Custom hex…")
-                    self.cap_hex_edit.setText(hex_color)
-                self.btn_pick_color.setChecked(False)
-                self._picking_color = False
-                self._click_history.append("cap_pick")
-            elif len(self.lane_polygon) < 4:
+            if len(self.lane_polygon) < 4:
                 self.lane_polygon.append((x_orig, y_orig))
                 self._click_history.append("lane")
                 self.points_list.addItem(

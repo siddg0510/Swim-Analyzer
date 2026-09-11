@@ -16,9 +16,10 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 import numpy as np
 
-from ..pipeline import AnalysisResult, AIAnalysisResult
+from ..core.models import AnalysisResult, AIAnalysisResult
 from ..export import export_csv
 from ..analysis.benchmarks import compare_to_benchmark
+from ..analysis.comparator import DTWResult, JOINT_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +120,10 @@ class DashboardWidget(QWidget):
             if ai.video_comparison:
                 tabs.addTab(self._build_video_comparison_tab(ai), "🎥 Video Comparison")
 
+        # DTW biomechanical comparison tab
+        if result.dtw_result is not None:
+            tabs.addTab(self._build_dtw_tab(result.dtw_result), "🧐 DTW Biomechanics")
+
         layout.addWidget(tabs)
 
         # -- Bottom bar --
@@ -140,8 +145,13 @@ class DashboardWidget(QWidget):
     # Original tabs (preserved from existing code)
     # ------------------------------------------------------------------
     def _build_charts_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(8, 8, 8, 8)
 
         fig = Figure(figsize=(7, 7), tight_layout=True)
         fig.patch.set_facecolor("#2f3640")
@@ -186,9 +196,31 @@ class DashboardWidget(QWidget):
         ax3.set_title("Stroke Length Over the Race")
         ax3.grid(alpha=0.2, color="#7f8fa6")
 
+        # Highlight low-confidence segments
+        gemini_labeled = False
+        unresolved_labeled = False
+        for seg in self.result.low_confidence_segments:
+            is_gemini = seg.resolved_by == "gemini"
+            color = "#f39c12" if is_gemini else "#e74c3c"
+            label = None
+            if is_gemini and not gemini_labeled:
+                label = "🤖 Gemini Recovery"
+                gemini_labeled = True
+            elif not is_gemini and not unresolved_labeled:
+                label = "⚠️ Splash / Low Conf"
+                unresolved_labeled = True
+
+            ax2.axvspan(seg.start_time_s, seg.end_time_s, color=color, alpha=0.25, label=label)
+            ax3.axvspan(seg.start_time_s, seg.end_time_s, color=color, alpha=0.25)
+
+        if gemini_labeled or unresolved_labeled:
+            ax2.legend(loc="upper right", facecolor="#353b48", edgecolor="#7f8fa6", labelcolor="#f5f6fa", fontsize=8)
+
         canvas = FigureCanvasQTAgg(fig)
+        canvas.setMinimumHeight(640)
         v.addWidget(canvas)
-        return w
+        scroll.setWidget(w)
+        return scroll
 
     def _build_splits_tab(self) -> QWidget:
         w = QWidget()
@@ -271,23 +303,77 @@ class DashboardWidget(QWidget):
         return w
 
     def _build_quality_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(8, 8, 8, 8)
         dr = self.result.discrepancy_report
-        v.addWidget(QLabel(
-            f"Frames auto-corrected via backward re-tracking / interpolation: {dr.corrected_count}\n"
-            f"Frames still uncertain after correction: {dr.still_uncertain_count}"
-        ))
+
+        # Tracking summary stats
+        summary_box = QGroupBox("📊 Tracking Engine Telemetry")
+        s_layout = QGridLayout(summary_box)
+
+        total_frames = len(self.result.csv_rows)
+        gemini_frames = self.result.gemini_assisted_frames
+        cv_frames = self.result.cv_only_frames or max(0, total_frames - gemini_frames)
+
+        s_layout.addWidget(QLabel("<b>Total Tracked Frames:</b>"), 0, 0)
+        s_layout.addWidget(QLabel(str(total_frames)), 0, 1)
+
+        s_layout.addWidget(QLabel("<b>CV-Only Frames:</b>"), 0, 2)
+        s_layout.addWidget(QLabel(f"{cv_frames} ({(cv_frames/total_frames*100):.1f}%)" if total_frames else "0"), 0, 3)
+
+        s_layout.addWidget(QLabel("<b>🤖 Gemini-Assisted Frames:</b>"), 1, 0)
+        s_layout.addWidget(QLabel(f"<span style='color:#f39c12; font-weight:bold;'>{gemini_frames} ({(gemini_frames/total_frames*100):.1f}%)</span>" if total_frames else "0"), 1, 1)
+
+        s_layout.addWidget(QLabel("<b>Auto-Corrected Frames:</b>"), 1, 2)
+        s_layout.addWidget(QLabel(str(dr.corrected_count)), 1, 3)
+
+        s_layout.addWidget(QLabel("<b>Still Uncertain Frames:</b>"), 2, 0)
+        s_layout.addWidget(QLabel(f"<span style='color:#e74c3c; font-weight:bold;'>{dr.still_uncertain_count}</span>"), 2, 1)
+
+        v.addWidget(summary_box)
+
+        # Segments Table
+        segs = self.result.low_confidence_segments
+        v.addWidget(QLabel(f"<h3>Low-Confidence & Occlusion Segments ({len(segs)})</h3>"))
+        if segs:
+            table = QTableWidget(len(segs), 6)
+            table.setHorizontalHeaderLabels([
+                "Start Frame", "End Frame", "Start Time (s)", "End Time (s)", "Reason", "Resolution",
+            ])
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            for r, seg in enumerate(segs):
+                table.setItem(r, 0, QTableWidgetItem(str(seg.start_frame)))
+                table.setItem(r, 1, QTableWidgetItem(str(seg.end_frame)))
+                table.setItem(r, 2, QTableWidgetItem(f"{seg.start_time_s:.2f}"))
+                table.setItem(r, 3, QTableWidgetItem(f"{seg.end_time_s:.2f}"))
+                table.setItem(r, 4, QTableWidgetItem(seg.reason.title()))
+
+                res_item = QTableWidgetItem(seg.resolved_by.title() if seg.resolved_by else "Unresolved")
+                if seg.resolved_by == "gemini":
+                    res_item.setForeground(Qt.GlobalColor.darkYellow)
+                elif not seg.resolved_by:
+                    res_item.setForeground(Qt.GlobalColor.red)
+                table.setItem(r, 5, res_item)
+            v.addWidget(table)
+        else:
+            v.addWidget(QLabel("<i>No prolonged low-confidence tracking segments detected. Clean track throughout.</i>"))
+
         if not self.result.pose_available:
             v.addWidget(QLabel(
-                "<b>Note:</b> no pose landmarks were detected in this "
+                "<br><b>Note:</b> no pose landmarks were detected in this "
                 "video. Stroke classification, stroke rate/length, and "
                 "breakout-distance metrics will be empty or low-confidence. "
                 "Check that models/pose_landmarker.task was downloaded "
                 "(see README) and that the swimmer is reasonably visible "
                 "and unobstructed in frame."
             ))
-        return w
+        scroll.setWidget(w)
+        return scroll
 
     # ------------------------------------------------------------------
     # AI-powered tabs
@@ -722,6 +808,114 @@ class DashboardWidget(QWidget):
         v.addStretch(1)
         scroll.setWidget(content)
         return scroll
+
+    # ------------------------------------------------------------------
+    # DTW Biomechanical Comparison tab
+    # ------------------------------------------------------------------
+    def _build_dtw_tab(self, dtw: DTWResult) -> QWidget:
+        """
+        Show the DTW comparison result:
+          - Flaw Score gauge (large number, colour-coded)
+          - Per-joint error bar chart (matplotlib)
+          - Method and gold-standard label
+        """
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        # ── Flaw Score ────────────────────────────────────────────────
+        score = dtw.flaw_score
+        if score < 20:
+            score_color = "#27ae60"   # green
+            score_label = "Excellent"
+        elif score < 40:
+            score_color = "#2ecc71"
+            score_label = "Good"
+        elif score < 60:
+            score_color = "#f39c12"   # orange
+            score_label = "Needs Improvement"
+        else:
+            score_color = "#e74c3c"   # red
+            score_label = "Significant Difference"
+
+        header = QLabel(
+            f"<h2 style='color:{score_color};'>DTW Flaw Score: {score:.1f} / 100</h2>"
+            f"<b style='color:{score_color};'>{score_label}</b><br>"
+            f"<span style='color:#7f8fa6;'>0 = perfect match to Olympic template &nbsp;|&nbsp; "
+            f"100 = maximum deviation</span><br>"
+            f"<span style='color:#7f8fa6;font-size:9pt;'>Gold standard: {dtw.gold_label or 'N/A'}  "
+            f"&nbsp;|&nbsp; Method: {dtw.method}</span>"
+        )
+        header.setWordWrap(True)
+        v.addWidget(header)
+
+        # ── Per-joint error bar chart ─────────────────────────────────
+        fig = Figure(figsize=(7, 3.5), tight_layout=True)
+        fig.patch.set_facecolor("#2f3640")
+        ax = fig.add_subplot(111)
+        ax.set_facecolor("#353b48")
+        ax.tick_params(colors="#f5f6fa", labelsize=8)
+        ax.xaxis.label.set_color("#f5f6fa")
+        ax.yaxis.label.set_color("#f5f6fa")
+        ax.title.set_color("#f5f6fa")
+        for spine in ax.spines.values():
+            spine.set_color("#4a5568")
+
+        joint_labels = [j.replace("_", "\n") for j in JOINT_NAMES]
+        errors_pct = [e * 100.0 for e in dtw.per_joint_errors]  # convert [0,1] → 0–100
+
+        bar_colors = [
+            "#27ae60" if e < 20 else "#f39c12" if e < 40 else "#e74c3c"
+            for e in errors_pct
+        ]
+        bars = ax.bar(joint_labels, errors_pct, color=bar_colors, edgecolor="#1e1e24", linewidth=0.5)
+        ax.set_ylim(0, max(max(errors_pct) * 1.2, 10))
+        ax.set_ylabel("Deviation from Elite (%)", color="#f5f6fa")
+        ax.set_title("Per-Joint Biomechanical Deviation vs. Olympic Gold Standard", color="#f5f6fa")
+        ax.axhline(y=20, color="#27ae60", linestyle="--", alpha=0.5, linewidth=1, label="Good threshold")
+        ax.axhline(y=40, color="#f39c12", linestyle="--", alpha=0.5, linewidth=1, label="Needs improvement")
+        ax.legend(facecolor="#353b48", labelcolor="#f5f6fa", fontsize=7)
+
+        for bar, val in zip(bars, errors_pct):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.5,
+                f"{val:.1f}%",
+                ha="center", va="bottom",
+                color="#f5f6fa", fontsize=7,
+            )
+
+        canvas = FigureCanvasQTAgg(fig)
+        v.addWidget(canvas)
+
+        # ── Interpretation text ───────────────────────────────────────
+        worst_joints = sorted(
+            zip(JOINT_NAMES, dtw.per_joint_errors), key=lambda x: -x[1]
+        )[:3]
+        lines = ["<b>Biggest deviations from elite model:</b><ul>"]
+        for jname, err in worst_joints:
+            lines.append(
+                f"<li><b>{jname.replace('_', ' ').title()}</b>: "
+                f"{err * 100:.1f}% deviation</li>"
+            )
+        lines.append("</ul>")
+        if dtw.method == "euclidean_fallback":
+            lines.append(
+                "<p style='color:#f39c12;'>⚠️  <b>fastdtw not installed</b> — using simplified "
+                "Euclidean comparison. Install with <code>pip install fastdtw</code> for full "
+                "Dynamic Time Warping analysis that accounts for speed differences.</p>"
+            )
+        lines.append(
+            "<p style='color:#7f8fa6; font-size:9pt;'>The gold-standard template is a synthetic "
+            "biomechanically-shaped placeholder. Replace it with a real elite-swimmer template "
+            "by running <code>scripts/generate_templates.py</code> on reference footage.</p>"
+        )
+        interp = QLabel("".join(lines))
+        interp.setWordWrap(True)
+        interp.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(interp)
+
+        v.addStretch(1)
+        return w
 
     # ------------------------------------------------------------------
     # Actions

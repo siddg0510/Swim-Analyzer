@@ -20,3 +20,31 @@ google-genai>=1.14.0
 
 # Packaging
 pyinstaller==6.*
+
+# Web backend & API
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.12
+
+# ---------------------------------------------------------------------------
+# Optional — Multi-swimmer detection (Module A/B/C — detector.py, tracker.py)
+#
+# ultralytics: YOLOv8 person detector. License: AGPL-3.0. Only imported when
+#   the user enables "Multi-Swimmer Mode" in the GUI; the default HSV-based
+#   cap tracking pipeline works without it.
+# supervision: ByteTrack wrapper used alongside ultralytics.
+#
+# Install with:  pip install ultralytics supervision
+# ---------------------------------------------------------------------------
+# ultralytics>=8.0.0
+# supervision>=0.20.0
+
+# ---------------------------------------------------------------------------
+# Optional — DTW Biomechanical Comparison (Module D — comparator.py)
+#
+# fastdtw: Dynamic Time Warping implementation. If not installed, the
+#   comparator falls back to simpler Euclidean distance comparison.
+#
+# Install with:  pip install fastdtw
+# ---------------------------------------------------------------------------
+# fastdtw>=0.3.4

@@ -97,7 +97,8 @@ def classify_window(frames: list[PoseFrame]) -> StrokeClassification:
     # estimate — flagged as such in the module docstring.
     shoulder_mid = (l_sh_y + r_sh_y) / 2.0
     hip_mid = (l_hip_y + r_hip_y) / 2.0
-    nose_offset = np.nanmean(nose_y - shoulder_mid)
+    diff = nose_y - shoulder_mid
+    nose_offset = float(np.nanmean(diff)) if np.any(~np.isnan(diff)) else 0.0
     face_up_score = float(np.tanh(nose_offset / 30.0))  # >0 suggests supine
 
     votes = {s: 0.0 for s in ("freestyle", "backstroke", "breaststroke", "butterfly")}

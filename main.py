@@ -11,11 +11,8 @@ import os
 # Suppress harmless MediaPipe/TFLite C++ diagnostic logs
 os.environ["GLOG_minloglevel"] = "2"
 
-_SCRIPTS_PATH = r"C:\Users\SiddG\AppData\Local\Python\pythoncore-3.14-64\Scripts"
-if _SCRIPTS_PATH not in sys.path:
-    sys.path.append(_SCRIPTS_PATH)
-if _SCRIPTS_PATH not in os.environ.get("PATH", ""):
-    os.environ["PATH"] += os.pathsep + _SCRIPTS_PATH
+
+
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
@@ -25,6 +22,21 @@ from src.config import resource_path
 
 
 def main() -> int:
+    args = [a.lower() for a in sys.argv[1:]]
+
+    if any(a in ("--help", "-h") for a in args):
+        print("Swim Race Analyzer")
+        print("Usage:")
+        print("  python main.py        Launch desktop GUI")
+        print("  python main.py web    Launch web server on http://localhost:8000")
+        return 0
+
+    if any(a in ("web", "--web", "server", "serve") for a in args):
+        import uvicorn
+        print("Starting Swim Analyzer Web Application on http://localhost:8000 ...")
+        uvicorn.run("web.app:app", host="0.0.0.0", port=8000, reload=True)
+        return 0
+
     from pathlib import Path
     models_dir = Path(__file__).parent.resolve() / "models"
     model_path = models_dir / "pose_landmarker.task"
@@ -107,6 +119,50 @@ def main() -> int:
             padding: 4px;
             border: 1px solid #353b48;
             font-weight: bold;
+        }
+        QScrollBar:vertical {
+            background: #1e1e24;
+            width: 8px;
+            margin: 0;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:vertical {
+            background: #353b48;
+            min-height: 20px;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #00a8ff;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QScrollBar:horizontal {
+            background: #1e1e24;
+            height: 8px;
+            margin: 0;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #353b48;
+            min-width: 20px;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #00a8ff;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0;
+        }
+        QProgressBar {
+            background-color: #2f3640;
+            border: 1px solid #353b48;
+            border-radius: 4px;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #00a8ff;
+            border-radius: 3px;
         }
     """)
     
