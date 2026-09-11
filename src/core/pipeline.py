@@ -153,6 +153,38 @@ def run_analysis(
             calibrator.add_point(pixel, dist)
         calibrator.solve()
 
+    # ── Calibration presence guard (graceful fail) ───────────────────────────
+    # A monocular pixel→metre mapping needs either (a) reference points — from
+    # the manual picker or AI auto-calibration — or (b) AI split timestamps we
+    # can interpolate distance from. With NEITHER, no distance/velocity/split
+    # metric can exist. Rather than crash deep in the frame loop when
+    # pixel_to_distance() hits an unsolved calibrator, fail up front with an
+    # actionable message (product decision: manual UI + AI + graceful fail).
+    calibration_solved = calibrator.result is not None
+    have_ai_splits = bool(ai_splits and getattr(ai_splits, "splits", None))
+    if not calibration_solved and not have_ai_splits:
+        cap.release()  # release the capture handle before the early exit
+        raise RuntimeError(
+            "No usable calibration. Provide at least 2 calibration reference "
+            "points (manual lane / reference-point picker) or enable AI "
+            "auto-calibration with a valid Gemini API key. Without either, "
+            "pixels cannot be mapped to metres and no distance or split "
+            "metrics can be produced."
+        )
+
+    def _calib_distance(x_shifted: float, y_shifted: float) -> float:
+        """Distance-along-lane for a camera-motion-corrected pixel.
+
+        Uses the solved calibrator when one exists; when only AI splits are
+        available (no geometry), returns 0.0 here — the authoritative per-frame
+        distances for that path are derived post-loop from the AI split
+        timeline (see ``get_distance_for_point``). This keeps the in-loop phase
+        heuristic from crashing on an unsolved calibrator.
+        """
+        if calibrator.result is not None:
+            return calibrator.pixel_to_distance(x_shifted, y_shifted)
+        return 0.0
+
     initial_color = active_kf.cap_color or cfg.cap_color or "yellow"
     tracker = CapTracker(initial_color, active_kf.lane_polygon_px, recovery_agent=recovery_agent)
     pose_estimator = PoseEstimator()
@@ -227,9 +259,10 @@ def run_analysis(
 
             # Rebuild calibrator for the new keyframe
             calibrator = PoolCalibrator()
-            for pixel, dist in active_kf.reference_points:
-                calibrator.add_point(pixel, dist)
-            calibrator.solve()
+            if active_kf.reference_points:
+                for pixel, dist in active_kf.reference_points:
+                    calibrator.add_point(pixel, dist)
+                calibrator.solve()
 
             # Update lane constraints and cap color for cap tracker
             if active_kf.cap_color:
@@ -320,7 +353,7 @@ def run_analysis(
 
         # Shift the tracked point by the cumulative camera motion to map it
         # back to the coordinate space of the calibration frame
-        distance_m = calibrator.pixel_to_distance(tp.x_px + cam_dx, tp.y_px + cam_dy)
+        distance_m = _calib_distance(tp.x_px + cam_dx, tp.y_px + cam_dy)
         last_distance_m = distance_m
 
         if distance_m >= cfg.pool_length_m - FINISH_ZONE_M and not finish_active:
@@ -335,15 +368,35 @@ def run_analysis(
         pf = pose_estimator.process(frame, frame_idx, int(t_s * 1000))
         pose_frames.append((t_s, pf))
 
-        if tp.confidence < 1.0 and pf.present and 0 in pf.landmarks_px:
-            # Fallback to pose estimator's nose if color tracker fails
-            tp.x_px = float(pf.landmarks_px[0][0])
-            tp.y_px = float(pf.landmarks_px[0][1])
-            tp.confidence = 0.9
-            tp.source = "pose_fallback"
-            tracker.kalman.correct(tp.x_px, tp.y_px)
-            # Recalculate distance_m
-            distance_m = calibrator.pixel_to_distance(tp.x_px + cam_dx, tp.y_px + cam_dy)
+        # Pose-nose fallback — LEGACY (single-swimmer) path ONLY.
+        #
+        # In multi-swimmer mode the AntiSplashTracker owns the confidence and
+        # source, and its coasting EKF must not be second-guessed by a
+        # possibly-hallucinated pose landmark — so we leave ast_result intact.
+        #
+        # Even in the legacy path this used to fire on essentially every frame
+        # (`confidence < 1.0`), relabel the point to a fake "0.9" and re-run the
+        # tracker's Kalman step a SECOND time (track_frame already advanced it a
+        # full predict+correct this frame — a genuine double update). Now it
+        # fires only when the colour tracker actually failed (confidence below
+        # the splash gate) and MediaPipe reports the nose with decent
+        # visibility, assigns an honest visibility-scaled confidence capped well
+        # below 1.0, and does NOT touch the filter (no double update).
+        if (
+            anti_splash_tracker is None
+            and tp.confidence < SPLASH_CONFIDENCE_GATE
+            and pf.present
+            and 0 in pf.landmarks_px
+        ):
+            nose_x, nose_y, nose_vis = pf.landmarks_px[0]
+            if nose_vis >= 0.5:
+                tp.x_px = float(nose_x)
+                tp.y_px = float(nose_y)
+                # Honest: pose during splash/underwater is unreliable, so cap at
+                # 0.6 and scale by the landmark's own visibility.
+                tp.confidence = float(min(0.6, 0.3 + 0.3 * nose_vis))
+                tp.source = "pose_fallback"
+                distance_m = _calib_distance(tp.x_px + cam_dx, tp.y_px + cam_dy)
 
         track_points.append(TrackPoint(
             frame_idx=frame_idx, time_s=t_s, x_px=tp.x_px, y_px=tp.y_px,

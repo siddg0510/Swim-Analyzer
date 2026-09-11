@@ -17,8 +17,8 @@ from matplotlib.figure import Figure
 import numpy as np
 
 from ..core.models import AnalysisResult, AIAnalysisResult
+from ..core.metrics import velocity_benchmark_line
 from ..export import export_csv
-from ..analysis.benchmarks import compare_to_benchmark
 from ..analysis.comparator import DTWResult, JOINT_NAMES
 
 
@@ -282,13 +282,11 @@ class DashboardWidget(QWidget):
                 lines.append("Post-turn breakout: " + tp.note)
 
         vp = self.result.split_report.velocity_profile
-        avg_v = sum(v for _, v in vp) / len(vp) if vp else None
+        avg_v, comparison = velocity_benchmark_line(
+            self.result, self.event_distance, self.swimmer_sex
+        )
         if avg_v is not None:
             lines.append(f"\nAverage tracked velocity: {avg_v:.2f} m/s")
-            comparison = compare_to_benchmark(
-                avg_v, self.result.stroke_classification.stroke,
-                self.event_distance, sex=self.swimmer_sex,
-            )
             if comparison:
                 lines.append(comparison)
             else:

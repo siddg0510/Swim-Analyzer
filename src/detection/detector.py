@@ -31,13 +31,41 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# Contour fallback is a last-resort hint with no appearance model, so its
+# confidence is capped *below* the splash confidence gate (config default 0.4).
+# This means an adaptive-threshold blob can never, on its own, satisfy the
+# tracker's decision gate — during splash the tracker coasts on the EKF instead
+# of snapping to a foam/shadow artifact. Kept as a local constant (rather than
+# importing the gate) to avoid a lower→upper layer import; see the comment at
+# the call site if the gate value in src/config.py changes.
+_CONTOUR_FALLBACK_MAX_CONF = 0.35
+_CONTOUR_FALLBACK_MIN_CONF = 0.12
+
+
+def _sigmoid(x: float) -> float:
+    """Squash an unbounded SVM decision margin into a (0, 1) pseudo-confidence.
+
+    OpenCV's HOG ``detectMultiScale`` returns raw SVM margins (roughly 0..3+),
+    not probabilities. A logistic map is monotonic and bounded, giving an
+    honest 0-1 value for the ``Track.conf`` contract. This is a heuristic
+    squashing, NOT a calibrated probability.
+    """
+    return 1.0 / (1.0 + float(np.exp(-x)))
+
+
 # ---------------------------------------------------------------------------
 # Shared data structure
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Track:
-    """A single swimmer track returned by the detector each frame."""
+    """A single swimmer track returned by the detector each frame.
+
+    ``conf`` is always in [0.0, 1.0]. For YOLO it is the model's class
+    probability; for HOG it is a logistic-squashed SVM margin (see
+    :func:`_sigmoid`); for the adaptive-threshold contour fallback it is a
+    shape-plausibility score capped below the splash gate.
+    """
     id: int
     bbox: tuple[float, float, float, float]  # (x, y, w, h) in pixels
     conf: float                               # 0.0 – 1.0
@@ -137,9 +165,12 @@ class HOGIoUDetector:
 
         detections: list[tuple[float, float, float, float, float]] = []
         for i, (x, y, w, h) in enumerate(rects):
-            conf = float(weights[i]) if len(weights) > i else 0.5
-            if conf >= self._conf:
-                detections.append((float(x), float(y), float(w), float(h), conf))
+            raw = float(weights[i]) if len(weights) > i else 0.0
+            # Gate on the raw SVM margin (unchanged recall), but report a
+            # bounded 0-1 confidence so downstream consumers and the splash
+            # gate see a value that actually honours the Track.conf contract.
+            if raw >= self._conf:
+                detections.append((float(x), float(y), float(w), float(h), _sigmoid(raw)))
 
         # Fallback for swimmers in water (prone posture where upright HOG detector yields 0 detections)
         if not detections and frame_bgr is not None and frame_bgr.size > 0:
@@ -155,8 +186,23 @@ class HOGIoUDetector:
                 area = cv2.contourArea(cnt)
                 if 120 < area < (h_img * w_img * 0.35):
                     x, y, w, h = cv2.boundingRect(cnt)
-                    if 0.25 < w / max(h, 1) < 4.0:
-                        candidates.append((float(x), float(y), float(w), float(h), 0.7))
+                    aspect = w / max(h, 1)
+                    if 0.25 < aspect < 4.0:
+                        # Shape-plausibility confidence, deliberately capped
+                        # below the splash gate. A prone swimmer viewed from
+                        # poolside is a solid, elongated dark blob; foam/shadow
+                        # fragments are blobby or spidery. Grade on solidity
+                        # (area / bbox area) and aspect closeness to a swimmer-
+                        # like ~2.2, then squash into
+                        # [_CONTOUR_FALLBACK_MIN_CONF, _CONTOUR_FALLBACK_MAX_CONF].
+                        solidity = area / float(w * h) if w * h > 0 else 0.0
+                        aspect_score = max(0.0, 1.0 - abs(aspect - 2.2) / 2.2)
+                        shape = 0.5 * min(solidity, 1.0) + 0.5 * aspect_score
+                        conf = (
+                            _CONTOUR_FALLBACK_MIN_CONF
+                            + (_CONTOUR_FALLBACK_MAX_CONF - _CONTOUR_FALLBACK_MIN_CONF) * shape
+                        )
+                        candidates.append((float(x), float(y), float(w), float(h), conf))
             candidates.sort(key=lambda c: c[2] * c[3], reverse=True)
             detections = candidates[:8]
 

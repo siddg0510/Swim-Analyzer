@@ -53,7 +53,13 @@ class BenchmarkEntry:
     stroke_length_m: float | None
     breakout_distance_m: float | None
     source: str
-    precision: str = "verified"  # "verified" or "low_precision"
+    # Conservative default: an unmarked figure is treated as an ESTIMATE, never
+    # silently "verified". "verified" means the velocity is anchored to a cited
+    # record/result time you can check; "low_precision" is a hand-estimated
+    # average with no citable anchor. Defaulting to "verified" would let a
+    # missing flag (or a JSON-load failure that drops to the in-code fallback)
+    # silently overclaim an estimate as a checked figure.
+    precision: str = "low_precision"  # "verified" or "low_precision"
     retrieved_date: str | None = None
 
 
@@ -333,6 +339,34 @@ _BUILTIN_BENCHMARKS: list[BenchmarkEntry] = [
                "— OPEN WATER context, not pool.",
     ),
 ]
+
+# ---------------------------------------------------------------------------
+# Provenance reconciliation for the in-code fallback.
+#
+# The external JSON (data/benchmarks/elite_benchmarks.json) is the primary
+# source and carries per-entry precision + retrieved_date. This in-code list is
+# only used when that JSON is missing or fails to parse. Without the block
+# below, every fallback entry would take the dataclass default and appear as an
+# undated estimate — but worse, the OLD default was "verified", which meant a
+# JSON-load failure silently relabeled hand-estimated averages as checked
+# figures. We now mirror the JSON's labels here so the fallback degrades
+# gracefully with identical provenance. "verified" = average velocity anchored
+# to a cited record/result time; everything else keeps the conservative
+# low_precision default. The set is kept in lock-step with the JSON by
+# test_benchmarks.test_builtin_fallback_matches_json_precision.
+_BUILTIN_BENCHMARKS_COMPILED_DATE = "2024-08-11"
+_BUILTIN_VERIFIED_KEYS = {
+    ("freestyle", 50, "male"), ("freestyle", 50, "female"),
+    ("freestyle", 100, "male"), ("freestyle", 100, "female"),
+    ("freestyle", 200, "male"), ("freestyle", 200, "female"),
+    ("freestyle", 800, "female"), ("freestyle", 1500, "female"),
+    ("breaststroke", 100, "male"), ("freestyle", 10000, "mixed_top10"),
+}
+for _b in _BUILTIN_BENCHMARKS:
+    if (_b.stroke, _b.distance_m, _b.sex) in _BUILTIN_VERIFIED_KEYS:
+        _b.precision = "verified"
+    if _b.retrieved_date is None:
+        _b.retrieved_date = _BUILTIN_BENCHMARKS_COMPILED_DATE
 
 
 # ---------------------------------------------------------------------------
@@ -974,7 +1008,7 @@ def load_benchmarks_from_json(json_path: Path | str | None = None) -> tuple[
                 stroke_length_m=b.get("stroke_length_m"),
                 breakout_distance_m=b.get("breakout_distance_m"),
                 source=b["source"],
-                precision=b.get("precision", "verified"),
+                precision=b.get("precision", "low_precision"),
                 retrieved_date=b.get("retrieved_date"),
             )
             for b in raw.get("benchmarks", [])
@@ -1104,9 +1138,17 @@ def compare_to_benchmark(
     delta = user_avg_velocity_mps - b.avg_velocity_mps
     pct = 100 * delta / b.avg_velocity_mps
     direction = "faster than" if delta > 0 else "slower than"
+    # Flag estimated references so a low_precision figure is never presented
+    # with the same authority as a record-anchored one (honest sourcing).
+    caveat = ""
+    if b.precision != "verified":
+        caveat = (
+            " Note: this reference is an estimated average, not independently "
+            "verified to this precision."
+        )
     return (
         f"Average velocity is {abs(pct):.1f}% {direction} the reference "
-        f"figure ({b.avg_velocity_mps:.2f} m/s, {b.source})."
+        f"figure ({b.avg_velocity_mps:.2f} m/s, {b.source}).{caveat}"
     )
 
 

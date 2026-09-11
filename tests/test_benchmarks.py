@@ -279,5 +279,81 @@ class TestJSONBenchmarkLoading(unittest.TestCase):
         self.assertEqual(len(techs), 4)
 
 
+class TestBuiltinFallbackProvenance(unittest.TestCase):
+    """The in-code fallback (used when the JSON is missing/corrupt) must be as
+    honest as the JSON: it must never silently relabel an estimate as verified,
+    and it must not strip provenance dates. Regression guard for the bug where
+    _BUILTIN_BENCHMARKS defaulted every entry to precision='verified'."""
+
+    def test_conservative_default_is_low_precision(self):
+        """A BenchmarkEntry with no explicit precision is an ESTIMATE, never
+        silently 'verified'."""
+        entry = BenchmarkEntry(
+            stroke="freestyle", distance_m=100, sex="male",
+            avg_velocity_mps=2.0, stroke_rate_cpm=None,
+            stroke_length_m=None, breakout_distance_m=None,
+            source="unit test",
+        )
+        self.assertEqual(entry.precision, "low_precision")
+
+    def test_json_missing_default_is_low_precision(self):
+        """The JSON loader must also default a precision-less entry to estimate,
+        not 'verified' (a schema change must not silently overclaim)."""
+        import inspect
+        from src.analysis import benchmarks as bm
+        src = inspect.getsource(bm.load_benchmarks_from_json)
+        self.assertIn('b.get("precision", "low_precision")', src)
+
+    def test_builtin_fallback_all_have_retrieved_date(self):
+        from src.analysis.benchmarks import _BUILTIN_BENCHMARKS
+        undated = [
+            (b.stroke, b.distance_m, b.sex)
+            for b in _BUILTIN_BENCHMARKS if not b.retrieved_date
+        ]
+        self.assertEqual(undated, [], f"fallback entries missing retrieved_date: {undated}")
+
+    def test_builtin_fallback_matches_json_precision(self):
+        """The in-code fallback labels must stay in lock-step with the curated
+        JSON — otherwise a JSON-load failure would present different provenance
+        than a successful load. This guards the duplicated data from drifting."""
+        import json
+        from src.analysis.benchmarks import _BUILTIN_BENCHMARKS, _BENCHMARK_JSON_PATH
+
+        with open(_BENCHMARK_JSON_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        json_precision = {
+            (b["stroke"], b["distance_m"], b["sex"]): b.get("precision", "low_precision")
+            for b in raw["benchmarks"]
+        }
+        mismatches = []
+        for b in _BUILTIN_BENCHMARKS:
+            key = (b.stroke, b.distance_m, b.sex)
+            if key in json_precision and json_precision[key] != b.precision:
+                mismatches.append((key, "json=" + json_precision[key], "builtin=" + b.precision))
+        self.assertEqual(mismatches, [], f"fallback/JSON precision drift: {mismatches}")
+
+    def test_low_precision_comparison_is_flagged(self):
+        """A low_precision reference must be flagged as an estimate in the
+        user-facing comparison string; a verified one must not be."""
+        from src.analysis.benchmarks import get_benchmark
+        # Find one of each precision that has a velocity to compare against.
+        low = next(
+            b for b in BENCHMARKS
+            if b.precision == "low_precision" and b.avg_velocity_mps
+        )
+        verified = next(
+            b for b in BENCHMARKS
+            if b.precision == "verified" and b.avg_velocity_mps
+        )
+        low_str = compare_to_benchmark(low.avg_velocity_mps, low.stroke, low.distance_m, low.sex)
+        ver_str = compare_to_benchmark(
+            verified.avg_velocity_mps, verified.stroke, verified.distance_m, verified.sex
+        )
+        self.assertIsNotNone(low_str)
+        self.assertIsNotNone(ver_str)
+        self.assertIn("estimate", low_str.lower())
+        self.assertNotIn("estimate", ver_str.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

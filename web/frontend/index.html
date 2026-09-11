@@ -147,6 +147,79 @@
             </form>
           </div>
         </div>
+
+        <!-- Manual Pool Calibration (optional) — mirrors the desktop calibrator -->
+        <div class="card calib-card" id="calib-card" style="display: none;">
+          <div class="calib-head">
+            <div>
+              <h3 class="card-title">
+                Manual Pool Calibration
+                <span class="optional-tag">optional</span>
+              </h3>
+              <p class="section-desc">
+                Click the lane corners and known-distance reference points on a frame — the same
+                pixel→metre setup as the desktop app. Leave this blank to let Gemini AI
+                auto-calibrate. If AI is turned off, manual calibration is required.
+              </p>
+            </div>
+            <button type="button" id="calib-toggle" class="btn btn-secondary btn-sm">Set up calibration ▾</button>
+          </div>
+
+          <div class="calib-body" id="calib-body" style="display: none;">
+            <div class="calib-stage">
+              <div class="calib-canvas-wrap">
+                <canvas id="calib-canvas" width="640" height="360"></canvas>
+                <div id="calib-canvas-placeholder" class="calib-placeholder">Loading frame…</div>
+              </div>
+              <video id="calib-video" muted playsinline crossorigin="anonymous" style="display: none;"></video>
+              <div class="calib-seek-row">
+                <span class="calib-seek-label">Frame</span>
+                <input type="range" id="calib-seek" min="0" max="100" value="0" step="1" disabled>
+                <span id="calib-time-label" class="mono">0.00s</span>
+              </div>
+            </div>
+
+            <div class="calib-controls">
+              <div class="calib-mode-toggle" role="radiogroup" aria-label="Calibration mode">
+                <label class="calib-mode-opt">
+                  <input type="radio" name="calib-mode" value="lane" checked>
+                  <span>🟦 Lane corners <small>(up to 4)</small></span>
+                </label>
+                <label class="calib-mode-opt">
+                  <input type="radio" name="calib-mode" value="reference">
+                  <span>📏 Reference points</span>
+                </label>
+              </div>
+
+              <div class="form-group" id="calib-distance-group" style="display: none;">
+                <label for="calib-distance">Distance from start wall for next point (m)</label>
+                <input type="number" id="calib-distance" class="form-control" value="0" min="0" max="2000" step="0.01">
+              </div>
+
+              <div class="form-group">
+                <label for="calib-lane-number">Lane number</label>
+                <input type="number" id="calib-lane-number" class="form-control" value="4" min="1" max="10">
+              </div>
+
+              <div class="calib-points-block">
+                <span class="calib-points-title">Placed points</span>
+                <ul class="calib-points-list" id="calib-points-list">
+                  <li class="calib-points-empty">No points yet.</li>
+                </ul>
+              </div>
+
+              <div class="calib-btn-row">
+                <button type="button" id="calib-undo" class="btn btn-secondary btn-sm">Undo</button>
+                <button type="button" id="calib-clear" class="btn btn-secondary btn-sm">Clear all</button>
+              </div>
+
+              <p class="calib-hint" id="calib-hint">
+                Add at least 2 reference points to calibrate. Lane corners are optional but
+                help reject swimmers in adjacent lanes.
+              </p>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- STEP 2: Progress Section -->

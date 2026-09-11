@@ -162,6 +162,40 @@ class TestCoastMode:
         kf.gated_update(70.0, 50.0)
         assert kf.coast_frames == 0
 
+    def test_prolonged_coast_stays_bounded(self):
+        """Regression: a constant-acceleration filter must NOT extrapolate the
+        position to infinity during a long predict-only coast.
+
+        Before the coast-bounding fix, a poisoned velocity/acceleration made
+        the position diverge quadratically — on the splash fixture the tracked
+        point ran ~1,000,000 px off a 1280px frame. Here we hand the filter a
+        strong rightward run, then coast 200 frames and assert the estimate
+        stays physically plausible (bounded) and finite, and that the per-frame
+        step shrinks toward a position-hold rather than growing.
+        """
+        from src.tracking.tracker import SwimmerKalmanFilter, MAX_PLAUSIBLE_SPEED_PX
+        kf = SwimmerKalmanFilter()
+        kf.initialize(200.0, 100.0)
+        # Establish a fast rightward velocity (near the plausible ceiling).
+        for x in range(210, 460, 50):
+            kf.gated_update(float(x), 100.0)
+
+        xs = []
+        for _ in range(200):
+            px, py = kf.predict()
+            assert math.isfinite(px) and math.isfinite(py)
+            xs.append(px)
+
+        # Bounded: nowhere near the old ~1e6 runaway. Total coast travel is
+        # capped by the velocity clamp + decay, so a few thousand px at most.
+        assert abs(xs[-1]) < 5000.0, f"coast ran away to x={xs[-1]:.1f}"
+        # Per-frame step must never exceed the physical velocity clamp...
+        steps = [abs(xs[i] - xs[i - 1]) for i in range(1, len(xs))]
+        assert max(steps) <= MAX_PLAUSIBLE_SPEED_PX + 1e-3
+        # ...and should decay toward a hold (late steps far smaller than early).
+        assert steps[-1] < steps[0]
+        assert steps[-1] < 1.0
+
 
 class TestKalmanPointTrackerGating:
     def test_cap_tracker_gated_step_and_phase(self):

@@ -8,22 +8,18 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from src.core.models import AnalysisConfig, AnalysisResult
 from src.core.pipeline import run_analysis
+from src.core.metrics import summarize_result
 from src.export import export_csv
-from src.analysis.benchmarks import compare_to_benchmark
 
 from .models import (
     JobStatus,
     JobProgress,
     JobStatusResponse,
     RaceAnalysisMetrics,
-    SplitItem,
-    LowConfidenceSegmentModel,
 )
 from .storage import StorageManager
 
@@ -96,6 +92,28 @@ class JobWorker:
         record.cancel()
         return True
 
+    def purge_expired(self, ttl_seconds: float) -> int:
+        """Drop in-memory records for finished jobs older than the TTL.
+
+        The disk sweep (``StorageManager.cleanup_expired``) frees files; this
+        frees the matching ``JobRecord`` entries so the ``jobs`` dict does not
+        grow without bound over a long-running server. Only terminal jobs
+        (completed / failed / cancelled) are purged — active jobs are kept
+        regardless of age so a slow analysis is never dropped mid-run.
+        """
+        now = time.time()
+        terminal = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        stale = [
+            jid for jid, rec in self.jobs.items()
+            if rec.status in terminal
+            and (rec.completed_at or rec.created_at) < now - ttl_seconds
+        ]
+        for jid in stale:
+            del self.jobs[jid]
+        if stale:
+            logger.info("Purged %d expired in-memory job record(s)", len(stale))
+        return len(stale)
+
     async def _run_job_async(self, record: JobRecord):
         loop = asyncio.get_running_loop()
         record.status = JobStatus.PROCESSING
@@ -138,71 +156,12 @@ class JobWorker:
             record.progress.message = f"Failed: {exc}"
 
     def _format_metrics(self, cfg: AnalysisConfig, res: AnalysisResult) -> RaceAnalysisMetrics:
-        """Convert internal AnalysisResult into clean API metrics."""
-        splits_list: list[SplitItem] = []
-        for s in res.split_report.splits:
-            splits_list.append(SplitItem(
-                marker_m=s.marker_m,
-                time_s=round(s.time_s, 3),
-                split_time_s=round(s.split_time_s, 3) if s.split_time_s else None,
-                interpolated=s.interpolated,
-            ))
+        """Convert internal AnalysisResult into the API metrics model.
 
-        low_conf = [
-            LowConfidenceSegmentModel(
-                start_frame=seg.start_frame,
-                end_frame=seg.end_frame,
-                start_time_s=round(seg.start_time_s, 2),
-                end_time_s=round(seg.end_time_s, 2),
-                reason=seg.reason,
-                resolved_by=seg.resolved_by,
-            )
-            for seg in res.low_confidence_segments
-        ]
-
-        vp = res.split_report.velocity_profile
-        avg_v = sum(v for _, v in vp) / len(vp) if vp else None
-
-        bench_comparison = None
-        if avg_v is not None:
-            dist = cfg.event_distance_m or int(cfg.pool_length_m)
-            bench_comparison = compare_to_benchmark(
-                avg_v, res.stroke_classification.stroke,
-                dist, sex=cfg.swimmer_sex,
-            )
-
-        ai_dict: dict[str, Any] | None = None
-        if res.ai_result:
-            ai_dict = {}
-            if res.ai_result.error:
-                ai_dict["error"] = res.ai_result.error
-            if res.ai_result.technique_analysis:
-                ai_dict["technique_analysis"] = asdict(res.ai_result.technique_analysis)
-            if res.ai_result.elite_comparison:
-                ai_dict["elite_comparison"] = asdict(res.ai_result.elite_comparison)
-            if res.ai_result.improvement_plan:
-                ai_dict["improvement_plan"] = asdict(res.ai_result.improvement_plan)
-            if res.ai_result.race_strategy:
-                ai_dict["race_strategy"] = asdict(res.ai_result.race_strategy)
-
-        return RaceAnalysisMetrics(
-            event_distance_m=cfg.event_distance_m or cfg.pool_length_m,
-            stroke=res.stroke_classification.stroke,
-            stroke_confidence=round(res.stroke_classification.confidence, 2),
-            start_method=res.start_detection.method,
-            start_reaction_time_s=round(res.start_phase.reaction_time_s, 3) if res.start_phase.reaction_time_s else None,
-            start_15m_time_s=round(res.start_phase.time_to_15m_s, 3) if res.start_phase.time_to_15m_s else None,
-            turn_time_s=round(res.turn_phase.turn_duration_s, 3) if res.turn_phase and res.turn_phase.turn_duration_s else None,
-            total_time_s=round(res.split_report.total_time_s, 3) if res.split_report.total_time_s else None,
-            avg_velocity_mps=round(avg_v, 3) if avg_v else None,
-            splits=splits_list,
-            velocity_profile=[(round(d, 2), round(v, 3)) for d, v in res.split_report.velocity_profile],
-            stroke_rates=[(round(t, 2), round(r, 1)) for t, r in res.stroke_rates],
-            stroke_lengths=[(round(t, 2), round(l, 2)) for t, l in res.stroke_lengths],
-            low_confidence_segments=low_conf,
-            gemini_assisted_frames=res.gemini_assisted_frames,
-            cv_only_frames=res.cv_only_frames,
-            discrepancy_count=res.discrepancy_report.corrected_count + res.discrepancy_report.still_uncertain_count,
-            ai_result=ai_dict,
-            benchmark_comparison=bench_comparison,
-        )
+        The numbers themselves come from the shared-core canonical serializer
+        (:func:`src.core.metrics.summarize_result`) so the web API and the
+        desktop dashboard report identical figures. This method only adapts
+        that dict into the Pydantic response model (which coerces the nested
+        split / low-confidence dicts into their sub-models automatically).
+        """
+        return RaceAnalysisMetrics(**summarize_result(cfg, res))

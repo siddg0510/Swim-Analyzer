@@ -67,12 +67,24 @@ def hex_or_keyword_to_hsv_ranges(color: str) -> list[tuple[np.ndarray, np.ndarra
         h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
 
     ranges = []
-    # White/black/gray are hue-independent (low saturation); everything
-    # else gets a wide +/-25 deg hue window with a low saturation/value floor
-    # to tolerate wet-cap specular highlights and pool-water colour cast.
-    if color.lower() in ("white", "black", "silver", "gray"):
-        lower = np.array([0, 0, max(v - 80, 0)], dtype=np.uint8)
-        upper = np.array([180, 80, min(v + 80, 255)], dtype=np.uint8)
+    # Decide "achromatic" (white/black/gray/silver) from the *actual*
+    # saturation, not just the keyword. This fixes low-saturation HEX codes
+    # like '#FFFFFF' (s=0), which previously fell into the hue-based branch
+    # below with min_s=30 and therefore never matched a single pixel.
+    is_achromatic = color.lower() in ("white", "black", "silver", "gray") or s < 40
+
+    if is_achromatic:
+        # Hue-independent: band around the target brightness with a low
+        # saturation ceiling. Value floor is tied to the target value so a
+        # "white" cap (v~200-255) no longer reaches down into mid-gray pool
+        # water (v~120), which the old fixed v-80 floor did.
+        #
+        # Honesty note: bright white foam is genuinely close to a white cap in
+        # HSV — colour thresholding alone cannot fully separate them. Foam
+        # rejection is handled downstream (morphology, last-good proximity,
+        # Mahalanobis gating, and match-quality confidence), not here.
+        lower = np.array([0, 0, max(v - 60, 0)], dtype=np.uint8)
+        upper = np.array([180, 70, min(v + 60, 255)], dtype=np.uint8)
         ranges.append((lower, upper))
     else:
         # Much wider tolerance: ±25 hue, saturation can drop very low (wet caps)
@@ -314,37 +326,51 @@ class CapTracker:
             area = cv2.contourArea(c)
             if area < self.min_contour_area or area > self.max_contour_area:
                 continue
-                
+
             # Aspect ratio check (caps are roughly elliptical, not super long/skinny strings of noise)
             x, y, w, h = cv2.boundingRect(c)
             aspect_ratio = float(w) / h if h > 0 else 0
             if aspect_ratio < 0.2 or aspect_ratio > 5.0:
                 continue
-                
+
             M = cv2.moments(c)
             if M["m00"] == 0:
                 continue
             cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
             if not self._in_lane(cx, cy):
                 continue
-            candidates.append((cx, cy, area))
+
+            # Match-quality score (replaces the old pure-blob-size confidence,
+            # which handed a big splash sheet HIGH confidence). A real cap is a
+            # compact, roughly-round, plausibly-sized colour blob; splash foam
+            # is large, jagged and low-solidity. All three terms are cheap and
+            # scale-aware, and this is a heuristic, not a calibrated probability.
+            perim = cv2.arcLength(c, True)
+            circularity = (4.0 * np.pi * area / (perim * perim)) if perim > 0 else 0.0
+            solidity = area / float(w * h) if w * h > 0 else 0.0
+            big_penalty = max(0.0, 1.0 - area / float(self.max_contour_area))
+            quality = (
+                0.45 * min(circularity, 1.0)
+                + 0.35 * min(solidity, 1.0)
+                + 0.20 * big_penalty
+            )
+            quality = float(np.clip(quality, 0.05, 0.98))
+            candidates.append((cx, cy, area, quality))
 
         if not candidates:
             return None
 
         # Prefer the candidate closest to the last known good position (if
-        # any) over the simply-largest blob — this stops the tracker
+        # any) over the highest-quality blob — this stops the tracker
         # jumping to a stray patch of similarly-coloured splash/reflection.
         if self.last_good is not None:
             lx, ly = self.last_good
             candidates.sort(key=lambda c: (c[0] - lx) ** 2 + (c[1] - ly) ** 2)
         else:
-            candidates.sort(key=lambda c: -c[2])
+            candidates.sort(key=lambda c: -c[3])  # highest match-quality first
 
-        cx, cy, area = candidates[0]
-        max_area = max(c[2] for c in candidates)
-        confidence = min(1.0, 0.4 + 0.6 * min(area / 400.0, 1.0))
-        return cx, cy, confidence
+        cx, cy, area, quality = candidates[0]
+        return cx, cy, quality
 
     def track_frame(self, frame_bgr: np.ndarray, frame_idx: int) -> TrackedPoint:
         det = self.detect(frame_bgr)

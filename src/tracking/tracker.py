@@ -95,6 +95,19 @@ class SwimmerKalmanFilter:
     # Covariance growth factor per coast frame (P *= this each predict-only step)
     COAST_COV_GROWTH: float = 1.08
 
+    # Coast-prediction bounding. A constant-acceleration model in pure
+    # predict-only mode diverges *quadratically* (position ∝ ½·a·t²), so a
+    # single poisoned state extrapolates the swimmer off to infinity. Real
+    # unobserved motion is not unbounded acceleration, so during coast we:
+    #   • decay the (unobserved) acceleration each frame so it cannot compound,
+    #   • hard-clamp velocity to a plausible swim speed, and
+    #   • once the coast is prolonged (target effectively lost) decay velocity
+    #     toward zero so the estimate settles into a position-hold with growing
+    #     covariance rather than sliding off-screen.
+    COAST_ACCEL_DECAY: float = 0.5     # per coast frame
+    COAST_VEL_DECAY: float = 0.85      # per coast frame, once prolonged
+    COAST_VEL_DECAY_AFTER: int = 8     # coast frames before velocity decay kicks in
+
     def __init__(self) -> None:
         n, m = 6, 2
         self.kf = cv2.KalmanFilter(n, m)
@@ -152,16 +165,35 @@ class SwimmerKalmanFilter:
     def predict(self) -> tuple[float, float]:
         """Advance the filter one step (no measurement). Returns predicted (x, y).
 
-        During coast, covariance grows by COAST_COV_GROWTH per frame.
+        During coast, covariance grows by COAST_COV_GROWTH per frame, and the
+        state is bounded (see the COAST_* constants) so a poisoned velocity /
+        acceleration cannot extrapolate the position off-screen.
         """
         if not self._initialized:
             return float("nan"), float("nan")
-        pred = self.kf.predict()
+        self.kf.predict()
         self._coast_frames += 1
         # Grow covariance during coast to reflect increasing uncertainty
         if self._coast_frames > 0:
             self.kf.errorCovPost *= self.COAST_COV_GROWTH
-        return float(pred[0, 0]), float(pred[1, 0])
+
+        # Bound the coast so it stays physically plausible. cv2's predict()
+        # advances statePost (this is what makes successive predicts chain and,
+        # unbounded, diverge). We damp the higher-order terms in-place so the
+        # NEXT predict starts from a sane state.
+        s = self.kf.statePost
+        s[4, 0] *= self.COAST_ACCEL_DECAY   # ax — unobserved, must not compound
+        s[5, 0] *= self.COAST_ACCEL_DECAY   # ay
+        s[2, 0] = float(np.clip(s[2, 0], -MAX_PLAUSIBLE_SPEED_PX, MAX_PLAUSIBLE_SPEED_PX))
+        s[3, 0] = float(np.clip(s[3, 0], -MAX_PLAUSIBLE_SPEED_PX, MAX_PLAUSIBLE_SPEED_PX))
+        if self._coast_frames > self.COAST_VEL_DECAY_AFTER:
+            # Prolonged coast → target effectively lost: relax velocity toward a
+            # position-hold so the estimate stops sliding away while covariance
+            # keeps growing (honest "I no longer know where it is").
+            s[2, 0] *= self.COAST_VEL_DECAY
+            s[3, 0] *= self.COAST_VEL_DECAY
+        self.kf.statePost = s
+        return float(s[0, 0]), float(s[1, 0])
 
     def gated_update(
         self, x: float, y: float,
@@ -597,9 +629,23 @@ class AntiSplashTracker:
             if implied_speed > MAX_PLAUSIBLE_SPEED_PX:
                 fails += 1
 
+        # 4. Direction check: if the swimmer had real momentum when the coast
+        # began, a re-detection *behind* the direction of travel is almost
+        # certainly a different object (residual splash, a deck person, an
+        # adjacent-lane swimmer) rather than our target reversing. Only fires
+        # when |v| is meaningful, so a swimmer who submerged near-stationary
+        # (e.g. plateauing before a breakout) is not penalised — that ambiguous
+        # case is left for the Gemini resolver / appearance re-ID.
+        speed = (vx * vx + vy * vy) ** 0.5
+        if speed > 5.0:
+            dx, dy = candidate_x - pred_x, candidate_y - pred_y
+            along = (dx * vx + dy * vy) / speed  # signed projection onto heading
+            if along < -30.0:  # clearly behind, beyond position noise
+                fails += 1
+
         if fails >= 2:
             logger.debug(
-                "Re-ID validation REJECT: %d/3 checks failed "
+                "Re-ID validation REJECT: %d/4 checks failed "
                 "(dist=%.1f, last_area=%s, coast=%d frames)",
                 fails, dist, self._last_bbox_area, self._splash_frames,
             )

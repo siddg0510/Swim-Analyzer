@@ -81,6 +81,7 @@ document.addEventListener('DOMContentLoaded', () => {
     dropContent.style.display = 'none';
     filePreview.style.display = 'flex';
     btnStartAnalysis.disabled = false;
+    calibOnFileSelected(file);
   }
 
   function clearSelectedFile() {
@@ -89,6 +90,272 @@ document.addEventListener('DOMContentLoaded', () => {
     dropContent.style.display = 'block';
     filePreview.style.display = 'none';
     btnStartAnalysis.disabled = true;
+    calibReset();
+  }
+
+  // -------------------------------------------------------------------------
+  // Manual Pool Calibration Picker (optional) — the web mirror of the desktop
+  // CalibrationDialog. The user scrubs to a frame, clicks up to 4 lane corners
+  // and any number of distance-labelled reference points; on submit we serialise
+  // one keyframe into `calibration_json`. Fixed-camera assumption: a single
+  // keyframe at frame 0 (the landmarks don't move), which the backend accepts.
+  // -------------------------------------------------------------------------
+  const calibCard = document.getElementById('calib-card');
+  const calibToggle = document.getElementById('calib-toggle');
+  const calibBody = document.getElementById('calib-body');
+  const calibVideo = document.getElementById('calib-video');
+  const calibCanvas = document.getElementById('calib-canvas');
+  const calibCtx = calibCanvas ? calibCanvas.getContext('2d') : null;
+  const calibPlaceholder = document.getElementById('calib-canvas-placeholder');
+  const calibSeek = document.getElementById('calib-seek');
+  const calibTimeLabel = document.getElementById('calib-time-label');
+  const calibDistance = document.getElementById('calib-distance');
+  const calibDistanceGroup = document.getElementById('calib-distance-group');
+  const calibLaneNumber = document.getElementById('calib-lane-number');
+  const calibPointsList = document.getElementById('calib-points-list');
+  const calibHint = document.getElementById('calib-hint');
+  const calibUndo = document.getElementById('calib-undo');
+  const calibClear = document.getElementById('calib-clear');
+  const enableAiCheck = document.getElementById('enable-ai-check');
+
+  const CALIB_LANE_COLOR = '#00d2d3';
+  const CALIB_REF_COLOR = '#f1c40f';
+  const CALIB_MIN_REF_POINTS = 2;
+
+  let calibMode = 'lane';       // 'lane' | 'reference'
+  let calibRefPoints = [];      // [{ x, y, m }] in NATIVE video pixels
+  let calibLane = [];           // [{ x, y }] in NATIVE video pixels (max 4)
+  let calibHistory = [];        // 'ref' | 'lane' — for Undo
+  let calibVideoUrl = null;
+  let calibReady = false;
+
+  if (calibCard) {
+    document.querySelectorAll('input[name="calib-mode"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        const checked = document.querySelector('input[name="calib-mode"]:checked');
+        calibMode = checked ? checked.value : 'lane';
+        calibDistanceGroup.style.display = calibMode === 'reference' ? 'block' : 'none';
+      });
+    });
+
+    calibToggle.addEventListener('click', () => {
+      const open = calibBody.style.display !== 'none';
+      calibBody.style.display = open ? 'none' : 'block';
+      calibToggle.textContent = open ? 'Set up calibration ▾' : 'Hide calibration ▴';
+      if (!open) calibRedraw();
+    });
+
+    calibCanvas.addEventListener('click', (evt) => {
+      if (!calibReady) return;
+      // Map CSS/display pixels back to the video's native resolution — the
+      // coordinate space the analysis pipeline expects.
+      const rect = calibCanvas.getBoundingClientRect();
+      const nx = (evt.clientX - rect.left) * (calibCanvas.width / rect.width);
+      const ny = (evt.clientY - rect.top) * (calibCanvas.height / rect.height);
+
+      if (calibMode === 'reference') {
+        const m = parseFloat(calibDistance.value);
+        calibRefPoints.push({ x: nx, y: ny, m: Number.isFinite(m) ? m : 0 });
+        calibHistory.push('ref');
+      } else if (calibLane.length < 4) {
+        calibLane.push({ x: nx, y: ny });
+        calibHistory.push('lane');
+      }
+      calibRenderPoints();
+      calibRedraw();
+      calibUpdateHint();
+    });
+
+    calibUndo.addEventListener('click', () => {
+      const last = calibHistory.pop();
+      if (last === 'ref') calibRefPoints.pop();
+      else if (last === 'lane') calibLane.pop();
+      calibRenderPoints();
+      calibRedraw();
+      calibUpdateHint();
+    });
+
+    calibClear.addEventListener('click', () => {
+      calibRefPoints = [];
+      calibLane = [];
+      calibHistory = [];
+      calibRenderPoints();
+      calibRedraw();
+      calibUpdateHint();
+    });
+
+    calibSeek.addEventListener('input', () => {
+      if (!calibVideo.duration) return;
+      const t = (calibSeek.value / 1000) * calibVideo.duration;
+      // Nudge off the exact end so the last frame actually decodes.
+      calibVideo.currentTime = Math.min(t, Math.max(0, calibVideo.duration - 0.05));
+      calibTimeLabel.textContent = `${t.toFixed(2)}s`;
+    });
+
+    calibVideo.addEventListener('seeked', calibRedraw);
+    calibVideo.addEventListener('loadeddata', () => {
+      calibCanvas.width = calibVideo.videoWidth || 640;
+      calibCanvas.height = calibVideo.videoHeight || 360;
+      calibReady = true;
+      calibSeek.disabled = false;
+      calibPlaceholder.style.display = 'none';
+      calibRedraw();
+    });
+    calibVideo.addEventListener('error', () => {
+      calibReady = false;
+      calibSeek.disabled = true;
+      calibPlaceholder.textContent =
+        "Can't preview this format in-browser. Use MP4/WebM for manual calibration, or rely on AI auto-calibration.";
+      calibPlaceholder.style.display = 'flex';
+    });
+
+    if (enableAiCheck) enableAiCheck.addEventListener('change', calibUpdateHint);
+  }
+
+  function calibOnFileSelected(file) {
+    if (!calibCard) return;
+    calibReset();
+    calibCard.style.display = 'block';
+    calibVideoUrl = URL.createObjectURL(file);
+    calibVideo.src = calibVideoUrl;
+    calibVideo.load();
+    calibPlaceholder.textContent = 'Loading frame…';
+    calibPlaceholder.style.display = 'flex';
+    calibUpdateHint();
+  }
+
+  function calibReset() {
+    if (!calibCard) return;
+    calibRefPoints = [];
+    calibLane = [];
+    calibHistory = [];
+    calibReady = false;
+    calibSeek.value = 0;
+    calibSeek.disabled = true;
+    calibTimeLabel.textContent = '0.00s';
+    if (calibVideoUrl) {
+      URL.revokeObjectURL(calibVideoUrl);
+      calibVideoUrl = null;
+    }
+    calibVideo.removeAttribute('src');
+    try { calibVideo.load(); } catch (e) { /* ignore */ }
+    calibCard.style.display = 'none';
+    calibBody.style.display = 'none';
+    calibToggle.textContent = 'Set up calibration ▾';
+    calibRenderPoints();
+    if (calibCtx) calibCtx.clearRect(0, 0, calibCanvas.width, calibCanvas.height);
+  }
+
+  function calibRedraw() {
+    if (!calibCtx) return;
+    calibCtx.clearRect(0, 0, calibCanvas.width, calibCanvas.height);
+    if (calibReady) {
+      try {
+        calibCtx.drawImage(calibVideo, 0, 0, calibCanvas.width, calibCanvas.height);
+      } catch (e) { /* frame not ready */ }
+    }
+    const scale = calibCanvas.width / 640;
+
+    if (calibLane.length) {
+      calibCtx.strokeStyle = CALIB_LANE_COLOR;
+      calibCtx.fillStyle = 'rgba(0, 210, 211, 0.15)';
+      calibCtx.lineWidth = Math.max(2, 2 * scale);
+      calibCtx.beginPath();
+      calibLane.forEach((p, i) => (i ? calibCtx.lineTo(p.x, p.y) : calibCtx.moveTo(p.x, p.y)));
+      if (calibLane.length >= 3) calibCtx.closePath();
+      calibCtx.stroke();
+      if (calibLane.length >= 3) calibCtx.fill();
+      calibLane.forEach((p) => calibDot(p.x, p.y, CALIB_LANE_COLOR, scale));
+    }
+
+    calibRefPoints.forEach((p) => {
+      calibDot(p.x, p.y, CALIB_REF_COLOR, scale);
+      calibCtx.fillStyle = CALIB_REF_COLOR;
+      calibCtx.font = `${Math.max(12, 13 * scale)}px sans-serif`;
+      calibCtx.fillText(`${p.m}m`, p.x + 8 * scale, p.y - 6 * scale);
+    });
+  }
+
+  function calibDot(x, y, color, scale) {
+    const r = Math.max(4, 5 * scale);
+    calibCtx.beginPath();
+    calibCtx.arc(x, y, r, 0, Math.PI * 2);
+    calibCtx.fillStyle = color;
+    calibCtx.fill();
+    calibCtx.lineWidth = Math.max(1, scale);
+    calibCtx.strokeStyle = '#0a0a0a';
+    calibCtx.stroke();
+  }
+
+  function calibRenderPoints() {
+    if (!calibPointsList) return;
+    const items = [];
+    calibLane.forEach((p, i) =>
+      items.push(
+        `<li><span class="cp-tag cp-lane">Corner ${i + 1}</span> <span class="mono">${p.x.toFixed(0)}, ${p.y.toFixed(0)}</span></li>`
+      )
+    );
+    calibRefPoints.forEach((p) =>
+      items.push(
+        `<li><span class="cp-tag cp-ref">${p.m} m</span> <span class="mono">${p.x.toFixed(0)}, ${p.y.toFixed(0)}</span></li>`
+      )
+    );
+    calibPointsList.innerHTML = items.length
+      ? items.join('')
+      : '<li class="calib-points-empty">No points yet.</li>';
+  }
+
+  function calibUpdateHint() {
+    if (!calibHint) return;
+    const aiOn = enableAiCheck ? enableAiCheck.checked : true;
+    const n = calibRefPoints.length;
+    if (n >= CALIB_MIN_REF_POINTS) {
+      calibHint.textContent = `${n} reference points set — manual calibration will be used for this run.`;
+      calibHint.className = 'calib-hint calib-hint-ok';
+    } else if (!aiOn) {
+      calibHint.textContent = `Gemini AI is OFF — add at least ${CALIB_MIN_REF_POINTS} reference points (${n}/${CALIB_MIN_REF_POINTS}) or this run will be rejected.`;
+      calibHint.className = 'calib-hint calib-hint-warn';
+    } else {
+      calibHint.textContent =
+        'Add at least 2 reference points to calibrate manually, or leave blank to let Gemini AI auto-calibrate.';
+      calibHint.className = 'calib-hint';
+    }
+  }
+
+  function calibBuildPayload() {
+    const kf = {
+      frame_idx: 0, // fixed-camera assumption — landmarks are constant across frames
+      reference_points: calibRefPoints.map((p) => [[p.x, p.y], p.m]),
+      lane_polygon_px: calibLane.map((p) => [p.x, p.y]),
+      lane_number: parseInt(calibLaneNumber.value, 10) || null,
+    };
+    return JSON.stringify({ keyframes: [kf] });
+  }
+
+  // Returns true if the run may proceed (and appends calibration_json when a
+  // usable manual calibration exists); false if the run is blocked client-side.
+  function calibApplyToFormData(formData) {
+    const aiOn = enableAiCheck ? enableAiCheck.checked : true;
+    const n = calibRefPoints.length;
+
+    if (n >= CALIB_MIN_REF_POINTS) {
+      formData.append('calibration_json', calibBuildPayload());
+      return true;
+    }
+    // Fewer than 2 reference points is not a usable manual calibration.
+    if (!aiOn) {
+      calibCard.style.display = 'block';
+      calibBody.style.display = 'block';
+      calibToggle.textContent = 'Hide calibration ▴';
+      calibUpdateHint();
+      alert(
+        'Gemini AI is disabled, so manual calibration is required.\n\n' +
+          'Add at least 2 reference points (click known distances on a frame), or re-enable Gemini AI.'
+      );
+      return false;
+    }
+    // AI is on: proceed without manual calibration; the server auto-calibrates.
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -100,6 +367,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const formData = new FormData(analysisForm);
     formData.append('video', selectedFile);
+
+    // Unchecked checkboxes are omitted from FormData, and the server defaults
+    // enable_ai=True — so without this an *unchecked* AI toggle would silently
+    // stay on. Send the real state explicitly.
+    formData.set('enable_ai', enableAiCheck.checked ? 'true' : 'false');
+
+    // Attach manual calibration if usable, and enforce the same graceful-fail
+    // guard as the backend (AI off + <2 reference points → doomed run). Returns
+    // false and keeps us on the upload view if the run can't proceed.
+    if (!calibApplyToFormData(formData)) return;
 
     // Switch to progress view
     showSection(progressSection);
